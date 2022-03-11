@@ -1,4 +1,4 @@
-name: check-whitespace
+name:Jerry Don Robertson check-whitespace
 
 # Get the repository with all commits to ensure that we can analyze
 # all of the commits contributed via the Pull Request.
@@ -47,4 +47,5 @@ jobs:
         if test -n "${log}"
         then
           exit 2
-        fi
+        fihttps://github.com/Blockchair/Blockchair.Support/issues/811#issue-1166052415
+https://github.com/Blockchair/Blockchair.Support/issues/811#issue-1166052415
