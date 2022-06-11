@@ -1,97 +1,25 @@
 #ifndef __clang__
-/*
- * It is possible to #include CoreFoundation/CoreFoundation.h when compiling
- * with clang, but not with GCC as of time of writing.
- *
- * See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=93082 for details.
- */
-typedef unsigned int FSEventStreamCreateFlags;
-#define kFSEventStreamEventFlagNone               0x00000000
-#define kFSEventStreamEventFlagMustScanSubDirs    0x00000001
-#define kFSEventStreamEventFlagUserDropped        0x00000002
-#define kFSEventStreamEventFlagKernelDropped      0x00000004
-#define kFSEventStreamEventFlagEventIdsWrapped    0x00000008
-#define kFSEventStreamEventFlagHistoryDone        0x00000010
-#define kFSEventStreamEventFlagRootChanged        0x00000020
-#define kFSEventStreamEventFlagMount              0x00000040
-#define kFSEventStreamEventFlagUnmount            0x00000080
-#define kFSEventStreamEventFlagItemCreated        0x00000100
-#define kFSEventStreamEventFlagItemRemoved        0x00000200
-#define kFSEventStreamEventFlagItemInodeMetaMod   0x00000400
-#define kFSEventStreamEventFlagItemRenamed        0x00000800
-#define kFSEventStreamEventFlagItemModified       0x00001000
-#define kFSEventStreamEventFlagItemFinderInfoMod  0x00002000
-#define kFSEventStreamEventFlagItemChangeOwner    0x00004000
-#define kFSEventStreamEventFlagItemXattrMod       0x00008000
-#define kFSEventStreamEventFlagItemIsFile         0x00010000
-#define kFSEventStreamEventFlagItemIsDir          0x00020000
-#define kFSEventStreamEventFlagItemIsSymlink      0x00040000
-#define kFSEventStreamEventFlagOwnEvent           0x00080000
-#define kFSEventStreamEventFlagItemIsHardlink     0x00100000
-#define kFSEventStreamEventFlagItemIsLastHardlink 0x00200000
-#define kFSEventStreamEventFlagItemCloned         0x00400000
-
-typedef struct __FSEventStream *FSEventStreamRef;
-typedef const FSEventStreamRef ConstFSEventStreamRef;
-
-typedef unsigned int CFStringEncoding;
-#define kCFStringEncodingUTF8 0x08000100
-
-typedef const struct __CFString *CFStringRef;
-typedef const struct __CFArray *CFArrayRef;
-typedef const struct __CFRunLoop *CFRunLoopRef;
-
-struct FSEventStreamContext {
-    long long version;
-    void *cb_data, *retain, *release, *copy_description;
-};
-
-typedef struct FSEventStreamContext FSEventStreamContext;
-typedef unsigned int FSEventStreamEventFlags;
-#define kFSEventStreamCreateFlagNoDefer 0x02
-#define kFSEventStreamCreateFlagWatchRoot 0x04
-#define kFSEventStreamCreateFlagFileEvents 0x10
-
-typedef unsigned long long FSEventStreamEventId;
-#define kFSEventStreamEventIdSinceNow 0xFFFFFFFFFFFFFFFFULL
-
-typedef void (*FSEventStreamCallback)(ConstFSEventStreamRef streamRef,
-				      void *context,
-				      __SIZE_TYPE__ num_of_events,
-				      void *event_paths,
-				      const FSEventStreamEventFlags event_flags[],
-				      const FSEventStreamEventId event_ids[]);
-typedef double CFTimeInterval;
-FSEventStreamRef FSEventStreamCreate(void *allocator,
-				     FSEventStreamCallback callback,
-				     FSEventStreamContext *context,
-				     CFArrayRef paths_to_watch,
-				     FSEventStreamEventId since_when,
-				     CFTimeInterval latency,
-				     FSEventStreamCreateFlags flags);
-CFStringRef CFStringCreateWithCString(void *allocator, const char *string,
-				      CFStringEncoding encoding);
-CFArrayRef CFArrayCreate(void *allocator, const void **items, long long count,
-			 void *callbacks);
-void CFRunLoopRun(void);
-void CFRunLoopStop(CFRunLoopRef run_loop);
-CFRunLoopRef CFRunLoopGetCurrent(void);
-extern CFStringRef kCFRunLoopDefaultMode;
-void FSEventStreamScheduleWithRunLoop(FSEventStreamRef stream,
-				      CFRunLoopRef run_loop,
-				      CFStringRef run_loop_mode);
-unsigned char FSEventStreamStart(FSEventStreamRef stream);
-void FSEventStreamStop(FSEventStreamRef stream);
-void FSEventStreamInvalidate(FSEventStreamRef stream);
-void FSEventStreamRelease(FSEventStreamRef stream);
+#include "fsm-darwin-gcc.h"
 #else
-/*
- * Let Apple's headers declare `isalnum()` first, before
- * Git's headers override it via a constant
- */
-#include <string.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreServices/CoreServices.h>
+
+#ifndef AVAILABLE_MAC_OS_X_VERSION_10_13_AND_LATER
+/*
+ * This enum value was added in 10.13 to:
+ *
+ * /Applications/Xcode.app/Contents/Developer/Platforms/ \
+ *    MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/ \
+ *    Library/Frameworks/CoreServices.framework/Frameworks/ \
+ *    FSEvents.framework/Versions/Current/Headers/FSEvents.h
+ *
+ * If we're compiling against an older SDK, this symbol won't be
+ * present.  Silently define it here so that we don't have to ifdef
+ * the logging or masking below.  This should be harmless since older
+ * versions of macOS won't ever emit this FS event anyway.
+ */
+#define kFSEventStreamEventFlagItemCloned         0x00400000
+#endif
 #endif
 
 #include "cache.h"
@@ -227,6 +155,35 @@ static int ef_ignore_xattr(const FSEventStreamEventFlags ef)
 	return ((ef & mask) == kFSEventStreamEventFlagItemXattrMod);
 }
 
+/*
+ * On MacOS we have to adjust for Unicode composition insensitivity
+ * (where NFC and NFD spellings are not respected).  The different
+ * spellings are essentially aliases regardless of how the path is
+ * actually stored on the disk.
+ *
+ * This is related to "core.precomposeUnicode" (which wants to try
+ * to hide NFD completely and treat everything as NFC).  Here, we
+ * don't know what the value the client has (or will have) for this
+ * config setting when they make a query, so assume the worst and
+ * emit both when the OS gives us an NFD path.
+ */
+static void my_add_path(struct fsmonitor_batch *batch, const char *path)
+{
+	char *composed;
+
+	/* add the NFC or NFD path as received from the OS */
+	fsmonitor_batch__add_path(batch, path);
+
+	/* if NFD, also add the corresponding NFC spelling */
+	composed = (char *)precompose_string_if_needed(path);
+	if (!composed || composed == path)
+		return;
+
+	fsmonitor_batch__add_path(batch, composed);
+	free(composed);
+}
+
+
 static void fsevent_callback(ConstFSEventStreamRef streamRef,
 			     void *ctx,
 			     size_t num_of_events,
@@ -296,7 +253,7 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef,
 			/*
 			 * The spelling of the pathname of the root directory
 			 * has changed.  This includes the name of the root
-			 * directory itself of of any parent directory in the
+			 * directory itself or of any parent directory in the
 			 * path.
 			 *
 			 * (There may be other conditions that throw this,
@@ -377,7 +334,7 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef,
 
 				if (!batch)
 					batch = fsmonitor_batch__new();
-				fsmonitor_batch__add_path(batch, rel);
+				my_add_path(batch, rel);
 			}
 
 			if (event_flags[k] & kFSEventStreamEventFlagItemIsDir) {
@@ -390,7 +347,7 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef,
 
 				if (!batch)
 					batch = fsmonitor_batch__new();
-				fsmonitor_batch__add_path(batch, tmp.buf);
+				my_add_path(batch, tmp.buf);
 			}
 
 			break;
@@ -419,15 +376,18 @@ force_shutdown:
 }
 
 /*
- * NEEDSWORK: Investigate the proper value for the `latency` argument
- * in the call to `FSEventStreamCreate()`.  I'm not sure that this
- * needs to be a config setting or just something that we tune after
- * some testing.
+ * In the call to `FSEventStreamCreate()` to setup our watch, the
+ * `latency` argument determines the frequency of calls to our callback
+ * with new FS events.  Too slow and events get dropped; too fast and
+ * we burn CPU unnecessarily.  Since it is rather obscure, I don't
+ * think this needs to be a config setting.  I've done extensive
+ * testing on my systems and chosen the value below.  It gives good
+ * results and I've not seen any dropped events.
  *
  * With a latency of 0.1, I was seeing lots of dropped events during
  * the "touch 100000" files test within t/perf/p7519, but with a
- * latency of 0.001 I did not see any dropped events.  So the
- * "correct" value may be somewhere in between.
+ * latency of 0.001 I did not see any dropped events.  So I'm going
+ * to assume that this is the "correct" value.
  *
  * https://developer.apple.com/documentation/coreservices/1443980-fseventstreamcreate
  */
@@ -478,7 +438,7 @@ int fsm_listen__ctor(struct fsmonitor_daemon_state *state)
 	return 0;
 
 failed:
-	error("Unable to create FSEventStream.");
+	error(_("Unable to create FSEventStream."));
 
 	FREE_AND_NULL(state->listen_data);
 	return -1;
@@ -526,7 +486,7 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 	data->stream_scheduled = 1;
 
 	if (!FSEventStreamStart(data->stream)) {
-		error("Failed to start the FSEventStream");
+		error(_("Failed to start the FSEventStream"));
 		goto force_error_stop_without_loop;
 	}
 	data->stream_started = 1;

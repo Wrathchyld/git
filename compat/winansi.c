@@ -3,6 +3,7 @@
  */
 
 #undef NOGDI
+
 #include "../git-compat-util.h"
 #include <wingdi.h>
 #include <winreg.h>
@@ -571,6 +572,9 @@ static void detect_msys_tty(int fd)
 	/* get pipe name */
 	if (!NT_SUCCESS(NtQueryObject(h, ObjectNameInformation,
 			buffer, sizeof(buffer) - 2, &result)))
+		return;
+	if (result < sizeof(*nameinfo) || !nameinfo->Name.Buffer ||
+		!nameinfo->Name.Length)
 		return;
 	name = nameinfo->Name.Buffer;
 	name[nameinfo->Name.Length / sizeof(*name)] = 0;

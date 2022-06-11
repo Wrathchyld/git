@@ -5,23 +5,23 @@
 #include "fsmonitor.h"
 
 /*
- * GVFS (aka VFS for Git) is incompatible with FSMonitor.
+ * VFS for Git is incompatible with FSMonitor.
  *
- * Granted, core Git does not know anything about GVFS and we
+ * Granted, core Git does not know anything about VFS for Git and we
  * shouldn't make assumptions about a downstream feature, but users
  * can install both versions.  And this can lead to incorrect results
- * from core Git commands.  So, without bringing in any of the GVFS
- * code, do a simple config test for a published config setting.  (We
- * do not look at the various *_TEST_* environment variables.)
+ * from core Git commands.  So, without bringing in any of the VFS for
+ * Git code, do a simple config test for a published config setting.
+ * (We do not look at the various *_TEST_* environment variables.)
  */
-static enum fsmonitor_reason is_virtual(struct repository *r)
+static enum fsmonitor_reason check_vfs4git(struct repository *r)
 {
 	const char *const_str;
 
 	if (!repo_config_get_value(r, "core.virtualfilesystem", &const_str))
-		return FSMONITOR_REASON_VIRTUAL;
+		return FSMONITOR_REASON_VFS4GIT;
 
-	return FSMONITOR_REASON_ZERO;
+	return FSMONITOR_REASON_OK;
 }
 
 /*
@@ -74,7 +74,7 @@ static enum fsmonitor_reason is_virtual(struct repository *r)
  *     $ mklink /d ./link //server/share/repo
  *     $ git -C ./link status
  */
-static enum fsmonitor_reason is_remote(struct repository *r)
+static enum fsmonitor_reason check_remote(struct repository *r)
 {
 	wchar_t wpath[MAX_LONG_PATH];
 	wchar_t wfullpath[MAX_LONG_PATH];
@@ -86,7 +86,7 @@ static enum fsmonitor_reason is_remote(struct repository *r)
 	 * a multi-byte sequence.  See win32_has_dos_drive_prefix().
 	 */
 	if (xutftowcs_long_path(wpath, r->worktree) < 0)
-		return FSMONITOR_REASON_ZERO;
+		return FSMONITOR_REASON_ERROR;
 
 	/*
 	 * GetDriveTypeW() requires a final slash.  We assume that the
@@ -104,7 +104,7 @@ static enum fsmonitor_reason is_remote(struct repository *r)
 	 * correctly handle some UNC "\\server\share\..." paths.
 	 */
 	if (!GetFullPathNameW(wpath, MAX_LONG_PATH, wfullpath, NULL))
-		return FSMONITOR_REASON_ZERO;
+		return FSMONITOR_REASON_ERROR;
 
 	driveType = GetDriveTypeW(wfullpath);
 	trace_printf_key(&trace_fsmonitor,
@@ -113,25 +113,25 @@ static enum fsmonitor_reason is_remote(struct repository *r)
 
 	if (driveType == DRIVE_REMOTE) {
 		trace_printf_key(&trace_fsmonitor,
-				 "is_remote('%s') true",
+				 "check_remote('%s') true",
 				 r->worktree);
 		return FSMONITOR_REASON_REMOTE;
 	}
 
-	return FSMONITOR_REASON_ZERO;
+	return FSMONITOR_REASON_OK;
 }
 
 enum fsmonitor_reason fsm_os__incompatible(struct repository *r)
 {
 	enum fsmonitor_reason reason;
 
-	reason = is_virtual(r);
-	if (reason)
+	reason = check_vfs4git(r);
+	if (reason != FSMONITOR_REASON_OK)
 		return reason;
 
-	reason = is_remote(r);
-	if (reason)
+	reason = check_remote(r);
+	if (reason != FSMONITOR_REASON_OK)
 		return reason;
 
-	return FSMONITOR_REASON_ZERO;
+	return FSMONITOR_REASON_OK;
 }

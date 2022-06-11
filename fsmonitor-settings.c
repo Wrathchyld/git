@@ -38,7 +38,7 @@ static int check_for_incompatible(struct repository *r)
 		enum fsmonitor_reason reason;
 
 		reason = fsm_os__incompatible(r);
-		if (reason != FSMONITOR_REASON_ZERO) {
+		if (reason != FSMONITOR_REASON_OK) {
 			set_incompatible(r, reason);
 			return 1;
 		}
@@ -48,66 +48,25 @@ static int check_for_incompatible(struct repository *r)
 	return 0;
 }
 
-static struct fsmonitor_settings *s_init(struct repository *r)
+static int check_deprecated_builtin_config(struct repository *r)
 {
-	if (!r->settings.fsmonitor)
-		CALLOC_ARRAY(r->settings.fsmonitor, 1);
+	int core_use_builtin_fsmonitor = 0;
 
-	return r->settings.fsmonitor;
-}
-
-void fsm_settings__set_ipc(struct repository *r)
-{
-	struct fsmonitor_settings *s = s_init(r);
-
-	if (check_for_incompatible(r))
-		return;
-
-	s->mode = FSMONITOR_MODE_IPC;
-}
-
-void fsm_settings__set_hook(struct repository *r, const char *path)
-{
-	struct fsmonitor_settings *s = s_init(r);
-
-	if (check_for_incompatible(r))
-		return;
-
-	s->mode = FSMONITOR_MODE_HOOK;
-	s->hook_path = strdup(path);
-}
-
-void fsm_settings__set_disabled(struct repository *r)
-{
-	struct fsmonitor_settings *s = s_init(r);
-
-	s->mode = FSMONITOR_MODE_DISABLED;
-	s->reason = FSMONITOR_REASON_ZERO;
-	FREE_AND_NULL(s->hook_path);
-}
-
-static int check_for_ipc(struct repository *r)
-{
-	int value;
-
-	if (!repo_config_get_bool(r, "core.usebuiltinfsmonitor", &value) &&
-	    value) {
+	/*
+	 * If 'core.useBuiltinFSMonitor' is set, print a deprecation warning
+	 * suggesting the use of 'core.fsmonitor' instead. If the config is
+	 * set to true, set the appropriate mode and return 1 indicating that
+	 * the check resulted the config being set by this (deprecated) setting.
+	 */
+	if(!repo_config_get_bool(r, "core.useBuiltinFSMonitor", &core_use_builtin_fsmonitor) &&
+	   core_use_builtin_fsmonitor) {
+		if (!git_env_bool("GIT_SUPPRESS_USEBUILTINFSMONITOR_ADVICE", 0)) {
+			advise_if_enabled(ADVICE_USE_CORE_FSMONITOR_CONFIG,
+					  _("core.useBuiltinFSMonitor=true is deprecated;"
+					    "please set core.fsmonitor=true instead"));
+			setenv("GIT_SUPPRESS_USEBUILTINFSMONITOR_ADVICE", "1", 1);
+		}
 		fsm_settings__set_ipc(r);
-		return 1;
-	}
-
-	return 0;
-}
-
-static int check_for_hook(struct repository *r)
-{
-	const char *const_str;
-
-	if (repo_config_get_pathname(r, "core.fsmonitor", &const_str))
-		const_str = getenv("GIT_TEST_FSMONITOR");
-
-	if (const_str && *const_str) {
-		fsm_settings__set_hook(r, const_str);
 		return 1;
 	}
 
@@ -116,69 +75,161 @@ static int check_for_hook(struct repository *r)
 
 static void lookup_fsmonitor_settings(struct repository *r)
 {
-	if (check_for_ipc(r))
+	struct fsmonitor_settings *s;
+	const char *const_str;
+	int bool_value;
+
+	if (r->settings.fsmonitor)
 		return;
 
-	if (check_for_hook(r))
+	CALLOC_ARRAY(s, 1);
+	s->mode = FSMONITOR_MODE_DISABLED;
+	s->reason = FSMONITOR_REASON_OK;
+
+	r->settings.fsmonitor = s;
+
+	/*
+	 * Overload the existing "core.fsmonitor" config setting (which
+	 * has historically been either unset or a hook pathname) to
+	 * now allow a boolean value to enable the builtin FSMonitor
+	 * or to turn everything off.  (This does imply that you can't
+	 * use a hook script named "true" or "false", but that's OK.)
+	 */
+	switch (repo_config_get_maybe_bool(r, "core.fsmonitor", &bool_value)) {
+
+	case 0: /* config value was set to <bool> */
+		if (bool_value)
+			fsm_settings__set_ipc(r);
 		return;
 
-	fsm_settings__set_disabled(r);
+	case 1: /* config value was unset */
+		if (check_deprecated_builtin_config(r))
+			return;
+
+		const_str = getenv("GIT_TEST_FSMONITOR");
+		break;
+
+	case -1: /* config value set to an arbitrary string */
+		if (check_deprecated_builtin_config(r) ||
+		    repo_config_get_pathname(r, "core.fsmonitor", &const_str))
+			return;
+		break;
+
+	default: /* should not happen */
+		return;
+	}
+
+	if (!const_str || !*const_str)
+		return;
+
+	fsm_settings__set_hook(r, const_str);
 }
 
 enum fsmonitor_mode fsm_settings__get_mode(struct repository *r)
 {
-	if (!r->settings.fsmonitor)
-		lookup_fsmonitor_settings(r);
+	if (!r)
+		r = the_repository;
+
+	lookup_fsmonitor_settings(r);
 
 	return r->settings.fsmonitor->mode;
 }
 
 const char *fsm_settings__get_hook_path(struct repository *r)
 {
-	if (!r->settings.fsmonitor)
-		lookup_fsmonitor_settings(r);
+	if (!r)
+		r = the_repository;
+
+	lookup_fsmonitor_settings(r);
 
 	return r->settings.fsmonitor->hook_path;
 }
 
-static void create_reason_message(struct repository *r,
-				  struct strbuf *buf_reason)
+void fsm_settings__set_ipc(struct repository *r)
 {
-	struct fsmonitor_settings *s = r->settings.fsmonitor;
+	if (!r)
+		r = the_repository;
 
-	switch (s->reason) {
-	case FSMONITOR_REASON_ZERO:
+	lookup_fsmonitor_settings(r);
+
+	if (check_for_incompatible(r))
 		return;
 
-	case FSMONITOR_REASON_BARE:
-		strbuf_addstr(buf_reason,
-			      _("bare repos are incompatible with fsmonitor"));
-		return;
-
-	case FSMONITOR_REASON_VIRTUAL:
-		strbuf_addstr(buf_reason,
-			      _("virtual repos are incompatible with fsmonitor"));
-		return;
-
-	case FSMONITOR_REASON_REMOTE:
-		strbuf_addstr(buf_reason,
-			      _("remote repos are incompatible with fsmonitor"));
-		return;
-
-	default:
-		BUG("Unhandled case in create_reason_message '%d'", s->reason);
-	}
+	r->settings.fsmonitor->mode = FSMONITOR_MODE_IPC;
+	FREE_AND_NULL(r->settings.fsmonitor->hook_path);
 }
-enum fsmonitor_reason fsm_settings__get_reason(struct repository *r,
-					       struct strbuf *buf_reason)
+
+void fsm_settings__set_hook(struct repository *r, const char *path)
 {
-	strbuf_reset(buf_reason);
+	if (!r)
+		r = the_repository;
 
-	if (!r->settings.fsmonitor)
-		lookup_fsmonitor_settings(r);
+	lookup_fsmonitor_settings(r);
 
-	if (r->settings.fsmonitor->mode == FSMONITOR_MODE_INCOMPATIBLE)
-		create_reason_message(r, buf_reason);
+	if (check_for_incompatible(r))
+		return;
+
+	r->settings.fsmonitor->mode = FSMONITOR_MODE_HOOK;
+	FREE_AND_NULL(r->settings.fsmonitor->hook_path);
+	r->settings.fsmonitor->hook_path = strdup(path);
+}
+
+void fsm_settings__set_disabled(struct repository *r)
+{
+	if (!r)
+		r = the_repository;
+
+	lookup_fsmonitor_settings(r);
+
+	r->settings.fsmonitor->mode = FSMONITOR_MODE_DISABLED;
+	r->settings.fsmonitor->reason = FSMONITOR_REASON_OK;
+	FREE_AND_NULL(r->settings.fsmonitor->hook_path);
+}
+
+enum fsmonitor_reason fsm_settings__get_reason(struct repository *r)
+{
+	if (!r)
+		r = the_repository;
+
+	lookup_fsmonitor_settings(r);
 
 	return r->settings.fsmonitor->reason;
+}
+
+int fsm_settings__error_if_incompatible(struct repository *r)
+{
+	enum fsmonitor_reason reason = fsm_settings__get_reason(r);
+
+	switch (reason) {
+	case FSMONITOR_REASON_OK:
+		return 0;
+
+	case FSMONITOR_REASON_BARE:
+		error(_("bare repository '%s' is incompatible with fsmonitor"),
+		      xgetcwd());
+		return 1;
+
+	case FSMONITOR_REASON_ERROR:
+		error(_("repository '%s' is incompatible with fsmonitor due to errors"),
+		      r->worktree);
+		return 1;
+
+	case FSMONITOR_REASON_REMOTE:
+		error(_("remote repository '%s' is incompatible with fsmonitor"),
+		      r->worktree);
+		return 1;
+
+	case FSMONITOR_REASON_VFS4GIT:
+		error(_("virtual repository '%s' is incompatible with fsmonitor"),
+		      r->worktree);
+		return 1;
+
+	case FSMONITOR_REASON_NOSOCKETS:
+		error(_("repository '%s' is incompatible with fsmonitor due to lack of Unix sockets"),
+		      r->worktree);
+		return 1;
+	}
+
+	BUG("Unhandled case in fsm_settings__error_if_incompatible: '%d'",
+	    reason);
 }

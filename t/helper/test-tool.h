@@ -11,6 +11,7 @@ int cmd__chmtime(int argc, const char **argv);
 int cmd__cmp(int argc, const char **argv);
 int cmd__config(int argc, const char **argv);
 int cmd__crontab(int argc, const char **argv);
+int cmd__csprng(int argc, const char **argv);
 int cmd__ctype(int argc, const char **argv);
 int cmd__date(int argc, const char **argv);
 int cmd__delta(int argc, const char **argv);

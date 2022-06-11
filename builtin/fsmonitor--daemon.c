@@ -110,14 +110,14 @@ static int do_as_client__status(void)
 
 enum fsmonitor_cookie_item_result {
 	FCIR_ERROR = -1, /* could not create cookie file ? */
-	FCIR_INIT = 0,
+	FCIR_INIT,
 	FCIR_SEEN,
 	FCIR_ABORT,
 };
 
 struct fsmonitor_cookie_item {
 	struct hashmap_entry entry;
-	const char *name;
+	char *name;
 	enum fsmonitor_cookie_item_result result;
 };
 
@@ -167,31 +167,44 @@ static enum fsmonitor_cookie_item_result with_lock__wait_for_cookie(
 	 * that the listener thread has seen it.
 	 */
 	fd = open(cookie_pathname.buf, O_WRONLY | O_CREAT | O_EXCL, 0600);
-	if (fd >= 0) {
-		close(fd);
-		unlink(cookie_pathname.buf);
-
-		/*
-		 * NEEDSWORK: This is an infinite wait (well, unless another
-		 * thread sends us an abort).  I'd like to change this to
-		 * use `pthread_cond_timedwait()` and return an error/timeout
-		 * and let the caller do the trivial response thing.
-		 */
-		while (cookie->result == FCIR_INIT)
-			pthread_cond_wait(&state->cookies_cond,
-					  &state->main_lock);
-	} else {
+	if (fd < 0) {
 		error_errno(_("could not create fsmonitor cookie '%s'"),
 			    cookie->name);
 
 		cookie->result = FCIR_ERROR;
+		goto done;
 	}
 
+	/*
+	 * Technically, close() and unlink() can fail, but we don't
+	 * care here.  We only created the file to trigger a watch
+	 * event from the FS to know that when we're up to date.
+	 */
+	close(fd);
+	unlink(cookie_pathname.buf);
+
+	/*
+	 * Technically, this is an infinite wait (well, unless another
+	 * thread sends us an abort).  I'd like to change this to
+	 * use `pthread_cond_timedwait()` and return an error/timeout
+	 * and let the caller do the trivial response thing, but we
+	 * don't have that routine in our thread-utils.
+	 *
+	 * After extensive beta testing I'm not really worried about
+	 * this.  Also note that the above open() and unlink() calls
+	 * will cause at least two FS events on that path, so the odds
+	 * of getting stuck are pretty slim.
+	 */
+	while (cookie->result == FCIR_INIT)
+		pthread_cond_wait(&state->cookies_cond,
+				  &state->main_lock);
+
+done:
 	hashmap_remove(&state->cookies, &cookie->entry, NULL);
 
 	result = cookie->result;
 
-	free((char*)cookie->name);
+	free(cookie->name);
 	free(cookie);
 	strbuf_release(&cookie_pathname);
 
@@ -551,7 +564,7 @@ static void fsmonitor_free_token_data(struct fsmonitor_token_data *token)
  * [2] Some of those lost events may have been for cookie files.  We
  *     should assume the worst and abort them rather letting them starve.
  *
- * If there are no concurrent threads readering the current token data
+ * If there are no concurrent threads reading the current token data
  * series, we can free it now.  Otherwise, let the last reader free
  * it.
  *
@@ -809,9 +822,7 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 		trace2_data_intmax("fsmonitor", the_repository,
 				   "response/trivial", 1);
 
-		strbuf_release(&response_token);
-		strbuf_release(&requested_token_id);
-		return 0;
+		goto cleanup;
 	}
 
 	/*
@@ -927,6 +938,7 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	trace2_data_intmax("fsmonitor", the_repository, "response/count/files", count);
 	trace2_data_intmax("fsmonitor", the_repository, "response/count/duplicates", duplicates);
 
+cleanup:
 	strbuf_release(&response_token);
 	strbuf_release(&requested_token_id);
 	strbuf_release(&payload);
@@ -1362,7 +1374,7 @@ static int fsmonitor_run_daemon(void)
 	 */
 	home = getenv("HOME");
 	if (home && *home && chdir(home))
-		die_errno("could not cd home '%s'", home);
+		die_errno(_("could not cd home '%s'"), home);
 
 	err = fsmonitor_run_daemon_1(&state);
 
@@ -1379,14 +1391,10 @@ done:
 	strbuf_release(&state.path_cookie_prefix);
 	strbuf_release(&state.path_ipc);
 
-	/*
-	 * NEEDSWORK: Consider "rm -rf <gitdir>/<fsmonitor-dir>"
-	 */
-
 	return err;
 }
 
-static int try_to_run_foreground_daemon(int free_console)
+static int try_to_run_foreground_daemon(int detach_console)
 {
 	/*
 	 * Technically, we don't need to probe for an existing daemon
@@ -1397,7 +1405,7 @@ static int try_to_run_foreground_daemon(int free_console)
 	 * common error case.
 	 */
 	if (fsmonitor_ipc__get_state() == IPC_STATE__LISTENING)
-		die("fsmonitor--daemon is already running '%s'",
+		die(_("fsmonitor--daemon is already running '%s'"),
 		    the_repository->worktree);
 
 	if (fsmonitor__announce_startup) {
@@ -1407,7 +1415,7 @@ static int try_to_run_foreground_daemon(int free_console)
 	}
 
 #ifdef GIT_WINDOWS_NATIVE
-	if (free_console)
+	if (detach_console)
 		FreeConsole();
 #endif
 
@@ -1452,7 +1460,7 @@ static int try_to_start_background_daemon(void)
 	 * immediately exited).
 	 */
 	if (fsmonitor_ipc__get_state() == IPC_STATE__LISTENING)
-		die("fsmonitor--daemon is already running '%s'",
+		die(_("fsmonitor--daemon is already running '%s'"),
 		    the_repository->worktree);
 
 	if (fsmonitor__announce_startup) {
@@ -1465,7 +1473,7 @@ static int try_to_start_background_daemon(void)
 
 	strvec_push(&cp.args, "fsmonitor--daemon");
 	strvec_push(&cp.args, "run");
-	strvec_push(&cp.args, "--free-console");
+	strvec_push(&cp.args, "--detach");
 	strvec_pushf(&cp.args, "--ipc-threads=%d", fsmonitor__ipc_threads);
 
 	cp.no_stdin = 1;
@@ -1482,29 +1490,29 @@ static int try_to_start_background_daemon(void)
 	default:
 	case SBGR_ERROR:
 	case SBGR_CB_ERROR:
-		return error("daemon failed to start");
+		return error(_("daemon failed to start"));
 
 	case SBGR_TIMEOUT:
-		return error("daemon not online yet");
+		return error(_("daemon not online yet"));
 
 	case SBGR_DIED:
-		return error("daemon terminated");
+		return error(_("daemon terminated"));
 	}
 }
 
 int cmd_fsmonitor__daemon(int argc, const char **argv, const char *prefix)
 {
 	const char *subcmd;
-	int free_console = 0;
+	int detach_console = 0;
 
 	struct option options[] = {
-		OPT_BOOL(0, "free-console", &free_console, N_("free console")),
+		OPT_BOOL(0, "detach", &detach_console, N_("detach from console")),
 		OPT_INTEGER(0, "ipc-threads",
 			    &fsmonitor__ipc_threads,
 			    N_("use <n> ipc worker threads")),
 		OPT_INTEGER(0, "start-timeout",
 			    &fsmonitor__start_timeout_sec,
-			    N_("Max seconds to wait for background daemon startup")),
+			    N_("max seconds to wait for background daemon startup")),
 
 		OPT_END()
 	};
@@ -1524,19 +1532,14 @@ int cmd_fsmonitor__daemon(int argc, const char **argv, const char *prefix)
 	prepare_repo_settings(the_repository);
 	fsm_settings__set_ipc(the_repository);
 
-	if (fsm_settings__get_mode(the_repository) == FSMONITOR_MODE_INCOMPATIBLE) {
-		struct strbuf buf_reason = STRBUF_INIT;
-		fsm_settings__get_reason(the_repository, &buf_reason);
-		error("%s '%s'", buf_reason.buf, xgetcwd());
-		strbuf_release(&buf_reason);
-		return -1;
-	}
+	if (fsm_settings__error_if_incompatible(the_repository))
+		return 1;
 
 	if (!strcmp(subcmd, "start"))
 		return !!try_to_start_background_daemon();
 
 	if (!strcmp(subcmd, "run"))
-		return !!try_to_run_foreground_daemon(free_console);
+		return !!try_to_run_foreground_daemon(detach_console);
 
 	if (!strcmp(subcmd, "stop"))
 		return !!do_as_client__send_stop();

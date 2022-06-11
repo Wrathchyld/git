@@ -51,7 +51,7 @@ static int do_send_query(const char *token)
 
 	ret = fsmonitor_ipc__send_query(token, &answer);
 	if (ret < 0)
-		die(_("could not query fsmonitor--daemon"));
+		die("could not query fsmonitor--daemon");
 
 	write_in_full(1, answer.buf, answer.len);
 	strbuf_release(&answer);
@@ -169,9 +169,10 @@ static int do_hammer(const char *token, int nr_threads, int nr_requests)
 	free(data);
 
 	/*
-	 * TODO Decide if/when to return an error or call die().
+	 * Return an error if any of the _send_query requests failed.
+	 * We don't care about thread create/join errors.
 	 */
-	return 0;
+	return sum_errors > 0;
 }
 
 int cmd__fsmonitor_client(int argc, const char **argv)
@@ -182,9 +183,9 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 	int nr_requests = 1;
 
 	const char * const fsmonitor_client_usage[] = {
-		N_("test-helper fsmonitor-client query [<token>]"),
-		N_("test-helper fsmonitor-client flush"),
-		N_("test-helper fsmonitor-client hammer [<token>] [<threads>] [<requests>]"),
+		N_("test-tool fsmonitor-client query [<token>]"),
+		N_("test-tool fsmonitor-client flush"),
+		N_("test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]"),
 		NULL,
 	};
 
@@ -198,17 +199,12 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		OPT_END()
 	};
 
-	if (argc < 2)
-		usage_with_options(fsmonitor_client_usage, options);
-
-	if (argc == 2 && !strcmp(argv[1], "-h"))
-		usage_with_options(fsmonitor_client_usage, options);
-
-	subcmd = argv[1];
-	argv--;
-	argc++;
-
 	argc = parse_options(argc, argv, NULL, options, fsmonitor_client_usage, 0);
+
+	if (argc != 1)
+		usage_with_options(fsmonitor_client_usage, options);
+
+	subcmd = argv[0];
 
 	setup_git_directory();
 

@@ -101,7 +101,7 @@ static int normalize_path_in_utf8(wchar_t *wpath, DWORD wpath_len,
 		if (len > 0)
 			goto normalize;
 		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-			error("[GLE %ld] could not convert path to UTF-8: '%.*ls'",
+			error(_("[GLE %ld] could not convert path to UTF-8: '%.*ls'"),
 			      GetLastError(), (int)wpath_len, wpath);
 			return -1;
 		}
@@ -121,7 +121,7 @@ normalize:
  * to longname conversion on every notification event.
  *
  * We do not want to create a file to test this, so we assume that the
- * root directory contains a ".git" file or directory.  (Out caller
+ * root directory contains a ".git" file or directory.  (Our caller
  * only calls us for the worktree root, so this should be fine.)
  *
  * Remember the spelling of the shortname for ".git" if it exists.
@@ -221,11 +221,15 @@ static enum get_relative_result get_relative_longname(
 		 * lookup the longname for it.  Likewise, for moves
 		 * and renames where we are given the old name.)
 		 *
-		 * NEEDSWORK: Since deleting or moving a file or
-		 * directory by shortname is rather obscure, I'm going
-		 * ignore the failure and ask the caller to report the
-		 * original relative path.  This seemds kinder than
-		 * failing here and forcing a resync.
+		 * Since deleting or moving a file or directory by its
+		 * shortname is rather obscure, I'm going ignore the
+		 * failure and ask the caller to report the original
+		 * relative path.  This seems kinder than failing here
+		 * and forcing a resync.  Besides, forcing a resync on
+		 * every file/directory delete would effectively
+		 * cripple monitoring.
+		 *
+		 * We might revisit this in the future.
 		 */
 		return GRR_NO_CONVERSION_NEEDED;
 	}
@@ -363,7 +367,7 @@ static int start_rdcw_watch(struct fsm_listen_data *data,
 	if (watch->is_active)
 		return 0;
 
-	error("ReadDirectoryChangedW failed on '%s' [GLE %ld]",
+	error(_("ReadDirectoryChangedW failed on '%s' [GLE %ld]"),
 	      watch->path.buf, GetLastError());
 	return -1;
 }
@@ -416,7 +420,7 @@ static int recv_rdcw_watch(struct one_watch *watch)
 	 * Shutdown if we get any error.
 	 */
 
-	error("GetOverlappedResult failed on '%s' [GLE %ld]",
+	error(_("GetOverlappedResult failed on '%s' [GLE %ld]"),
 	      watch->path.buf, gle);
 	return -1;
 }

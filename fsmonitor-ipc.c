@@ -6,7 +6,41 @@
 #include "strbuf.h"
 #include "trace2.h"
 
-#ifdef HAVE_FSMONITOR_DAEMON_BACKEND
+#ifndef HAVE_FSMONITOR_DAEMON_BACKEND
+
+/*
+ * A trivial implementation of the fsmonitor_ipc__ API for unsupported
+ * platforms.
+ */
+
+int fsmonitor_ipc__is_supported(void)
+{
+	return 0;
+}
+
+const char *fsmonitor_ipc__get_path(void)
+{
+	return NULL;
+}
+
+enum ipc_active_state fsmonitor_ipc__get_state(void)
+{
+	return IPC_STATE__OTHER_ERROR;
+}
+
+int fsmonitor_ipc__send_query(const char *since_token,
+			      struct strbuf *answer)
+{
+	return -1;
+}
+
+int fsmonitor_ipc__send_command(const char *command,
+				struct strbuf *answer)
+{
+	return -1;
+}
+
+#else
 
 int fsmonitor_ipc__is_supported(void)
 {
@@ -58,11 +92,6 @@ try_again:
 
 		trace2_data_intmax("fsm_client", NULL,
 				   "query/response-length", answer->len);
-
-		if (fsmonitor_is_trivial_response(answer))
-			trace2_data_intmax("fsm_client", NULL,
-					   "query/trivial-response", 1);
-
 		goto done;
 
 	case IPC_STATE__NOT_LISTENING:
@@ -123,7 +152,7 @@ int fsmonitor_ipc__send_command(const char *command,
 	state = ipc_client_try_connect(fsmonitor_ipc__get_path(), &options,
 				       &connection);
 	if (state != IPC_STATE__LISTENING) {
-		die("fsmonitor--daemon is not running");
+		die(_("fsmonitor--daemon is not running"));
 		return -1;
 	}
 
@@ -132,45 +161,11 @@ int fsmonitor_ipc__send_command(const char *command,
 	ipc_client_close_connection(connection);
 
 	if (ret == -1) {
-		die("could not send '%s' command to fsmonitor--daemon", c);
+		die(_("could not send '%s' command to fsmonitor--daemon"), c);
 		return -1;
 	}
 
 	return 0;
-}
-
-#else
-
-/*
- * A trivial implementation of the fsmonitor_ipc__ API for unsupported
- * platforms.
- */
-
-int fsmonitor_ipc__is_supported(void)
-{
-	return 0;
-}
-
-const char *fsmonitor_ipc__get_path(void)
-{
-	return NULL;
-}
-
-enum ipc_active_state fsmonitor_ipc__get_state(void)
-{
-	return IPC_STATE__OTHER_ERROR;
-}
-
-int fsmonitor_ipc__send_query(const char *since_token,
-			      struct strbuf *answer)
-{
-	return -1;
-}
-
-int fsmonitor_ipc__send_command(const char *command,
-				struct strbuf *answer)
-{
-	return -1;
 }
 
 #endif

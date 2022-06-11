@@ -172,27 +172,13 @@ static int query_fsmonitor_hook(struct repository *r,
 
 	if (result)
 		trace2_data_intmax("fsm_hook", NULL, "query/failed", result);
-	else {
+	else
 		trace2_data_intmax("fsm_hook", NULL, "query/response-length",
 				   query_result->len);
-
-		if (fsmonitor_is_trivial_response(query_result))
-			trace2_data_intmax("fsm_hook", NULL,
-					   "query/trivial-response", 1);
-	}
 
 	trace2_region_leave("fsm_hook", "query", NULL);
 
 	return result;
-}
-
-int fsmonitor_is_trivial_response(const struct strbuf *query_result)
-{
-	static char trivial_response[3] = { '\0', '/', '\0' };
-
-	return query_result->len >= 3 &&
-		!memcmp(trivial_response,
-			&query_result->buf[query_result->len - 3], 3);
 }
 
 static void fsmonitor_refresh_callback(struct index_state *istate, char *name)
@@ -304,8 +290,6 @@ static void fsmonitor_refresh_callback(struct index_state *istate, char *name)
  * will be updated automatically the first time the user touches
  * a tracked file and causes a command like `git status` to
  * update an mtime to be updated and/or set a flag bit.
- *
- * NEEDSWORK: Does this need to be a config value?
  */
 static int fsmonitor_force_update_threshold = 100;
 
@@ -318,6 +302,7 @@ void refresh_fsmonitor(struct index_state *istate)
 	struct strbuf last_update_token = STRBUF_INIT;
 	char *buf;
 	unsigned int i;
+	int is_trivial = 0;
 	struct repository *r = istate->repo ? istate->repo : the_repository;
 	enum fsmonitor_mode fsm_mode = fsm_settings__get_mode(r);
 
@@ -347,6 +332,10 @@ void refresh_fsmonitor(struct index_state *istate)
 			buf = query_result.buf;
 			strbuf_addstr(&last_update_token, buf);
 			bol = last_update_token.len + 1;
+			is_trivial = query_result.buf[bol] == '/';
+			if (is_trivial)
+				trace2_data_intmax("fsm_client", NULL,
+						   "query/trivial-response", 1);
 		} else {
 			/*
 			 * The builtin daemon is not available on this
@@ -404,6 +393,7 @@ void refresh_fsmonitor(struct index_state *istate)
 					query_success = 0;
 				} else {
 					bol = last_update_token.len + 1;
+					is_trivial = query_result.buf[bol] == '/';
 				}
 			} else if (hook_version < 0) {
 				hook_version = HOOK_INTERFACE_VERSION1;
@@ -416,7 +406,13 @@ void refresh_fsmonitor(struct index_state *istate)
 			query_success = !query_fsmonitor_hook(
 				r, HOOK_INTERFACE_VERSION1,
 				istate->fsmonitor_last_update, &query_result);
+			if (query_success)
+				is_trivial = query_result.buf[0] == '/';
 		}
+
+		if (is_trivial)
+			trace2_data_intmax("fsm_hook", NULL,
+					   "query/trivial-response", 1);
 
 		trace_performance_since(last_update, "fsmonitor process '%s'",
 					fsm_settings__get_hook_path(r));
@@ -442,7 +438,7 @@ apply_results:
 	 */
 	trace2_region_enter("fsmonitor", "apply_results", istate->repo);
 
-	if (query_success && query_result.buf[bol] != '/') {
+	if (query_success && !is_trivial) {
 		/*
 		 * Mark all pathnames returned by the monitor as dirty.
 		 *
@@ -475,7 +471,8 @@ apply_results:
 
 	} else {
 		/*
-		 * We received a trivial response, so invalidate everything.
+		 * We failed to get a response or received a trivial response,
+		 * so invalidate everything.
 		 *
 		 * We only want to run the post index changed hook if
 		 * we've actually changed entries, so keep track if we
@@ -576,13 +573,15 @@ void remove_fsmonitor(struct index_state *istate)
 void tweak_fsmonitor(struct index_state *istate)
 {
 	unsigned int i;
-	struct repository *r = istate->repo ? istate->repo : the_repository;
-	int fsmonitor_enabled = (fsm_settings__get_mode(r) > FSMONITOR_MODE_DISABLED);
+	int fsmonitor_enabled = (fsm_settings__get_mode(istate->repo)
+				 > FSMONITOR_MODE_DISABLED);
 
 	if (istate->fsmonitor_dirty) {
 		if (fsmonitor_enabled) {
 			/* Mark all entries valid */
 			for (i = 0; i < istate->cache_nr; i++) {
+				if (S_ISGITLINK(istate->cache[i]->ce_mode))
+					continue;
 				istate->cache[i]->ce_flags |= CE_FSMONITOR_VALID;
 			}
 

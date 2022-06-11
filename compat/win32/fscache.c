@@ -2,10 +2,10 @@
 #include "../../hashmap.h"
 #include "../win32.h"
 #include "fscache.h"
+#include "../../dir.h"
 #include "config.h"
 #include "../../mem-pool.h"
 #include "ntifs.h"
-#include "../../dir.h"
 
 static volatile long initialized;
 static DWORD dwTlsIndex;

@@ -11,30 +11,73 @@ then
 fi
 
 stop_daemon_delete_repo () {
-	r=$1
-	git -C $r fsmonitor--daemon stop >/dev/null 2>/dev/null
+	r=$1 &&
+	test_might_fail git -C $r fsmonitor--daemon stop &&
 	rm -rf $1
-	return 0
 }
 
 start_daemon () {
-	case "$#" in
-		1) r="-C $1";;
-		*) r="";
-	esac
+	r= tf= t2= tk= &&
 
-	git $r fsmonitor--daemon start || return $?
-	git $r fsmonitor--daemon status || return $?
+	while test "$#" -ne 0
+	do
+		case "$1" in
+		-C)
+			r="-C ${2?}"
+			shift
+			;;
+		--tf)
+			tf="${2?}"
+			shift
+			;;
+		--t2)
+			t2="${2?}"
+			shift
+			;;
+		--tk)
+			tk="${2?}"
+			shift
+			;;
+		-*)
+			BUG "error: unknown option: '$1'"
+			;;
+		*)
+			BUG "error: unbound argument: '$1'"
+			;;
+		esac
+		shift
+	done &&
 
-	return 0
+	(
+		if test -n "$tf"
+		then
+			GIT_TRACE_FSMONITOR="$tf"
+			export GIT_TRACE_FSMONITOR
+		fi &&
+
+		if test -n "$t2"
+		then
+			GIT_TRACE2_PERF="$t2"
+			export GIT_TRACE2_PERF
+		fi &&
+
+		if test -n "$tk"
+		then
+			GIT_TEST_FSMONITOR_TOKEN="$tk"
+			export GIT_TEST_FSMONITOR_TOKEN
+		fi &&
+
+		git $r fsmonitor--daemon start &&
+		git $r fsmonitor--daemon status
+	)
 }
 
 # Is a Trace2 data event present with the given catetory and key?
 # We do not care what the value is.
 #
 have_t2_data_event () {
-	c=$1
-	k=$2
+	c=$1 &&
+	k=$2 &&
 
 	grep -e '"event":"data".*"category":"'"$c"'".*"key":"'"$k"'"'
 }
@@ -43,7 +86,7 @@ test_expect_success 'explicit daemon start and stop' '
 	test_when_finished "stop_daemon_delete_repo test_explicit" &&
 
 	git init test_explicit &&
-	start_daemon test_explicit &&
+	start_daemon -C test_explicit &&
 
 	git -C test_explicit fsmonitor--daemon stop &&
 	test_must_fail git -C test_explicit fsmonitor--daemon status
@@ -63,7 +106,7 @@ test_expect_success 'implicit daemon start' '
 	# but this test case is only concerned with whether the daemon was
 	# implicitly started.)
 
-	GIT_TRACE2_EVENT="$(pwd)/.git/trace" \
+	GIT_TRACE2_EVENT="$PWD/.git/trace" \
 		test-tool -C test_implicit fsmonitor-client query --token 0 >actual &&
 	nul_to_q <actual >actual.filtered &&
 	grep "builtin:" actual.filtered &&
@@ -86,7 +129,7 @@ test_expect_success 'implicit daemon stop (delete .git)' '
 
 	git init test_implicit_1 &&
 
-	start_daemon test_implicit_1 &&
+	start_daemon -C test_implicit_1 &&
 
 	# deleting the .git directory will implicitly stop the daemon.
 	rm -rf test_implicit_1/.git &&
@@ -110,7 +153,7 @@ test_expect_success 'implicit daemon stop (rename .git)' '
 
 	git init test_implicit_2 &&
 
-	start_daemon test_implicit_2 &&
+	start_daemon -C test_implicit_2 &&
 
 	# renaming the .git directory will implicitly stop the daemon.
 	mv test_implicit_2/.git test_implicit_2/.xxx &&
@@ -143,7 +186,7 @@ test_expect_success MINGW,SHORTNAMES 'implicit daemon stop (rename GIT~1)' '
 
 	git init test_implicit_1s &&
 
-	start_daemon test_implicit_1s &&
+	start_daemon -C test_implicit_1s &&
 
 	# renaming the .git directory will implicitly stop the daemon.
 	# this moves {.git, GIT~1} to {.gitxyz, GITXYZ~1}.
@@ -173,7 +216,7 @@ test_expect_success MINGW,SHORTNAMES 'implicit daemon stop (rename GIT~2)' '
 	test_path_is_file test_implicit_1s2/GIT~1 &&
 	test_path_is_dir  test_implicit_1s2/GIT~2 &&
 
-	start_daemon test_implicit_1s2 &&
+	start_daemon -C test_implicit_1s2 &&
 
 	# renaming the .git directory will implicitly stop the daemon.
 	# the rename-from FS Event will contain the shortname.
@@ -188,42 +231,12 @@ test_expect_success MINGW,SHORTNAMES 'implicit daemon stop (rename GIT~2)' '
 	test_must_fail git -C test_implicit_1s2 fsmonitor--daemon status
 '
 
-# Confirm that MacOS hides all of the Unicode normalization and/or
-# case folding from the FS events.  That is, are the pathnames in the
-# FS events reported using the spelling on the disk or in the spelling
-# used by the other process.
-#
-# Note that we assume that the filesystem is set to case insensitive.
-#
-# NEEDSWORK: APFS handles Unicode and Unicode normalization
-# differently than HFS+.  I only have an APFS partition, so
-# more testing here would be helpful.
-#
-
-# Rename .git using alternate spelling and confirm that the daemon
-# sees the event using the correct spelling and shutdown.
-test_expect_success UTF8_NFD_TO_NFC 'MacOS event spelling (rename .GIT)' '
-	test_when_finished "stop_daemon_delete_repo test_apfs" &&
-
-	git init test_apfs &&
-	start_daemon test_apfs &&
-
-	test_path_is_dir test_apfs/.git &&
-	test_path_is_dir test_apfs/.GIT &&
-
-	mv test_apfs/.GIT test_apfs/.FOO &&
-	sleep 1 &&
-	mv test_apfs/.FOO test_apfs/.git &&
-
-	test_must_fail git -C test_apfs fsmonitor--daemon status
-'
-
 test_expect_success 'cannot start multiple daemons' '
 	test_when_finished "stop_daemon_delete_repo test_multiple" &&
 
 	git init test_multiple &&
 
-	start_daemon test_multiple &&
+	start_daemon -C test_multiple &&
 
 	test_must_fail git -C test_multiple fsmonitor--daemon start 2>actual &&
 	grep "fsmonitor--daemon is already running" actual &&
@@ -271,19 +284,18 @@ test_expect_success 'setup' '
 	echo 2 >T1/T2/T3/F2 &&
 	echo 2 >T1/T2/T3/T4/F2 &&
 
-	git -c core.useBuiltinFSMonitor= add . &&
+	git -c core.fsmonitor=false add . &&
 	test_tick &&
-	git -c core.useBuiltinFSMonitor= commit -m initial &&
+	git -c core.fsmonitor=false commit -m initial &&
 
-	git config core.useBuiltinFSMonitor true
+	git config core.fsmonitor true
 '
 
 # The test already explicitly stopped (or tried to stop) the daemon.
 # This is here in case something else fails first.
 #
 redundant_stop_daemon () {
-	git fsmonitor--daemon stop
-	return 0
+	test_might_fail git fsmonitor--daemon stop
 }
 
 test_expect_success 'update-index implicitly starts daemon' '
@@ -291,7 +303,7 @@ test_expect_success 'update-index implicitly starts daemon' '
 
 	test_must_fail git fsmonitor--daemon status &&
 
-	GIT_TRACE2_EVENT="$(pwd)/.git/trace_implicit_1" \
+	GIT_TRACE2_EVENT="$PWD/.git/trace_implicit_1" \
 		git update-index --fsmonitor &&
 
 	git fsmonitor--daemon status &&
@@ -307,7 +319,7 @@ test_expect_success 'status implicitly starts daemon' '
 
 	test_must_fail git fsmonitor--daemon status &&
 
-	GIT_TRACE2_EVENT="$(pwd)/.git/trace_implicit_2" \
+	GIT_TRACE2_EVENT="$PWD/.git/trace_implicit_2" \
 		git status >actual &&
 
 	git fsmonitor--daemon status &&
@@ -318,54 +330,44 @@ test_expect_success 'status implicitly starts daemon' '
 	test_subcommand git fsmonitor--daemon start <.git/trace_implicit_2
 '
 
-edit_files() {
-	echo 1 >modified
-	echo 2 >dir1/modified
-	echo 3 >dir2/modified
+edit_files () {
+	echo 1 >modified &&
+	echo 2 >dir1/modified &&
+	echo 3 >dir2/modified &&
 	>dir1/untracked
 }
 
-delete_files() {
-	rm -f delete
-	rm -f dir1/delete
+delete_files () {
+	rm -f delete &&
+	rm -f dir1/delete &&
 	rm -f dir2/delete
 }
 
-create_files() {
-	echo 1 >new
-	echo 2 >dir1/new
+create_files () {
+	echo 1 >new &&
+	echo 2 >dir1/new &&
 	echo 3 >dir2/new
 }
 
-rename_files() {
-	mv rename renamed
-	mv dir1/rename dir1/renamed
+rename_files () {
+	mv rename renamed &&
+	mv dir1/rename dir1/renamed &&
 	mv dir2/rename dir2/renamed
 }
 
-file_to_directory() {
-	rm -f delete
-	mkdir delete
+file_to_directory () {
+	rm -f delete &&
+	mkdir delete &&
 	echo 1 >delete/new
 }
 
-directory_to_file() {
-	rm -rf dir1
+directory_to_file () {
+	rm -rf dir1 &&
 	echo 1 >dir1
 }
 
-verify_status() {
-	git status >actual &&
-	GIT_INDEX_FILE=.git/fresh-index git read-tree master &&
-	GIT_INDEX_FILE=.git/fresh-index git -c core.useBuiltinFSMonitor= status >expect &&
-	test_cmp expect actual &&
-	echo HELLO AFTER &&
-	cat .git/trace &&
-	echo HELLO AFTER
-}
-
 move_directory_contents_deeper() {
-	mkdir T1/_new_
+	mkdir T1/_new_ &&
 	mv T1/[A-Z]* T1/_new_
 }
 
@@ -390,25 +392,20 @@ move_directory() {
 # daemon) because these commands might implicitly restart the daemon.
 
 clean_up_repo_and_stop_daemon () {
-	git reset --hard HEAD
-	git clean -fd
-	git fsmonitor--daemon stop
+	git reset --hard HEAD &&
+	git clean -fd &&
+	test_might_fail git fsmonitor--daemon stop &&
 	rm -f .git/trace
 }
 
 test_expect_success 'edit some files' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
-	(
-		GIT_TRACE_FSMONITOR="$(pwd)/.git/trace" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon
-	) &&
+	start_daemon --tf "$PWD/.git/trace" &&
 
 	edit_files &&
 
-	test-tool fsmonitor-client query --token 0 >/dev/null 2>&1 &&
+	test-tool fsmonitor-client query --token 0 &&
 
 	grep "^event: dir1/modified$"  .git/trace &&
 	grep "^event: dir2/modified$"  .git/trace &&
@@ -419,16 +416,11 @@ test_expect_success 'edit some files' '
 test_expect_success 'create some files' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
-	(
-		GIT_TRACE_FSMONITOR="$(pwd)/.git/trace" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon
-	) &&
+	start_daemon --tf "$PWD/.git/trace" &&
 
 	create_files &&
 
-	test-tool fsmonitor-client query --token 0 >/dev/null 2>&1 &&
+	test-tool fsmonitor-client query --token 0 &&
 
 	grep "^event: dir1/new$" .git/trace &&
 	grep "^event: dir2/new$" .git/trace &&
@@ -438,16 +430,11 @@ test_expect_success 'create some files' '
 test_expect_success 'delete some files' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
-	(
-		GIT_TRACE_FSMONITOR="$(pwd)/.git/trace" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon
-	) &&
+	start_daemon --tf "$PWD/.git/trace" &&
 
 	delete_files &&
 
-	test-tool fsmonitor-client query --token 0 >/dev/null 2>&1 &&
+	test-tool fsmonitor-client query --token 0 &&
 
 	grep "^event: dir1/delete$" .git/trace &&
 	grep "^event: dir2/delete$" .git/trace &&
@@ -457,16 +444,11 @@ test_expect_success 'delete some files' '
 test_expect_success 'rename some files' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
-	(
-		GIT_TRACE_FSMONITOR="$(pwd)/.git/trace" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon
-	) &&
+	start_daemon --tf "$PWD/.git/trace" &&
 
 	rename_files &&
 
-	test-tool fsmonitor-client query --token 0 >/dev/null 2>&1 &&
+	test-tool fsmonitor-client query --token 0 &&
 
 	grep "^event: dir1/rename$"  .git/trace &&
 	grep "^event: dir2/rename$"  .git/trace &&
@@ -479,16 +461,11 @@ test_expect_success 'rename some files' '
 test_expect_success 'rename directory' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
-	(
-		GIT_TRACE_FSMONITOR="$(pwd)/.git/trace" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon
-	) &&
+	start_daemon --tf "$PWD/.git/trace" &&
 
 	mv dirtorename dirrenamed &&
 
-	test-tool fsmonitor-client query --token 0 >/dev/null 2>&1 &&
+	test-tool fsmonitor-client query --token 0 &&
 
 	grep "^event: dirtorename/*$" .git/trace &&
 	grep "^event: dirrenamed/*$"  .git/trace
@@ -497,16 +474,11 @@ test_expect_success 'rename directory' '
 test_expect_success 'file changes to directory' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
-	(
-		GIT_TRACE_FSMONITOR="$(pwd)/.git/trace" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon
-	) &&
+	start_daemon --tf "$PWD/.git/trace" &&
 
 	file_to_directory &&
 
-	test-tool fsmonitor-client query --token 0 >/dev/null 2>&1 &&
+	test-tool fsmonitor-client query --token 0 &&
 
 	grep "^event: delete$"     .git/trace &&
 	grep "^event: delete/new$" .git/trace
@@ -515,16 +487,11 @@ test_expect_success 'file changes to directory' '
 test_expect_success 'directory changes to a file' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
-	(
-		GIT_TRACE_FSMONITOR="$(pwd)/.git/trace" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon
-	) &&
+	start_daemon --tf "$PWD/.git/trace" &&
 
 	directory_to_file &&
 
-	test-tool fsmonitor-client query --token 0 >/dev/null 2>&1 &&
+	test-tool fsmonitor-client query --token 0 &&
 
 	grep "^event: dir1$" .git/trace
 '
@@ -542,15 +509,7 @@ test_expect_success 'flush cached data' '
 
 	git init test_flush &&
 
-	(
-		GIT_TEST_FSMONITOR_TOKEN=true &&
-		export GIT_TEST_FSMONITOR_TOKEN &&
-
-		GIT_TRACE_FSMONITOR="$(pwd)/.git/trace_daemon" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon test_flush
-	) &&
+	start_daemon -C test_flush --tf "$PWD/.git/trace_daemon" --tk true &&
 
 	# The daemon should have an initial token with no events in _0 and
 	# then a few (probably platform-specific number of) events in _1.
@@ -559,8 +518,8 @@ test_expect_success 'flush cached data' '
 	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000001:0" >actual_0 &&
 	nul_to_q <actual_0 >actual_q0 &&
 
-	touch test_flush/file_1 &&
-	touch test_flush/file_2 &&
+	>test_flush/file_1 &&
+	>test_flush/file_2 &&
 
 	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000001:0" >actual_1 &&
 	nul_to_q <actual_1 >actual_q1 &&
@@ -580,7 +539,7 @@ test_expect_success 'flush cached data' '
 
 	grep "^builtin:test_00000002:0Q$" actual_q2 &&
 
-	touch test_flush/file_3 &&
+	>test_flush/file_3 &&
 
 	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000002:0" >actual_3 &&
 	nul_to_q <actual_3 >actual_q3 &&
@@ -603,15 +562,9 @@ test_expect_success 'setup worktree base' '
 test_expect_success 'worktree with .git file' '
 	git -C wt-base worktree add ../wt-secondary &&
 
-	(
-		GIT_TRACE2_PERF="$(pwd)/trace2_wt_secondary" &&
-		export GIT_TRACE2_PERF &&
-
-		GIT_TRACE_FSMONITOR="$(pwd)/trace_wt_secondary" &&
-		export GIT_TRACE_FSMONITOR &&
-
-		start_daemon wt-secondary
-	) &&
+	start_daemon -C wt-secondary \
+		--tf "$PWD/trace_wt_secondary" \
+		--t2 "$PWD/trace2_wt_secondary" &&
 
 	git -C wt-secondary fsmonitor--daemon stop &&
 	test_must_fail git -C wt-secondary fsmonitor--daemon status
@@ -634,39 +587,58 @@ test_expect_success 'cleanup worktrees' '
 # cause incorrect results when the untracked-cache is enabled.
 
 test_lazy_prereq UNTRACKED_CACHE '
-	{ git update-index --test-untracked-cache; ret=$?; } &&
-	test $ret -ne 1
+	git update-index --test-untracked-cache
 '
 
 test_expect_success 'Matrix: setup for untracked-cache,fsmonitor matrix' '
-	test_might_fail git config --unset core.useBuiltinFSMonitor &&
+	test_unconfig core.fsmonitor &&
 	git update-index --no-fsmonitor &&
 	test_might_fail git fsmonitor--daemon stop
 '
 
 matrix_clean_up_repo () {
+	git reset --hard HEAD &&
 	git clean -fd
-	git reset --hard HEAD
 }
 
 matrix_try () {
-	uc=$1
-	fsm=$2
-	fn=$3
+	uc=$1 &&
+	fsm=$2 &&
+	fn=$3 &&
+
+	if test $uc = true && test $fsm = false
+	then
+		# The untracked-cache is buggy when FSMonitor is
+		# DISABLED, so skip the tests for this matrix
+		# combination.
+		#
+		# We've observed random, occasional test failures on
+		# Windows and MacOS when the UC is turned on and FSM
+		# is turned off.  These are rare, but they do happen
+		# indicating that it is probably a race condition within
+		# the untracked cache itself.
+		#
+		# It usually happens when a test does F/D trickery and
+		# then the NEXT test fails because of extra status
+		# output from stale UC data from the previous test.
+		#
+		# Since FSMonitor is not involved in the error, skip
+		# the tests for this matrix combination.
+		#
+		return 0
+	fi &&
 
 	test_expect_success "Matrix[uc:$uc][fsm:$fsm] $fn" '
 		matrix_clean_up_repo &&
 		$fn &&
-		if test $uc = false -a $fsm = false
+		if test $uc = false && test $fsm = false
 		then
 			git status --porcelain=v1 >.git/expect.$fn
 		else
-			git status --porcelain=v1 >.git/actual.$fn
+			git status --porcelain=v1 >.git/actual.$fn &&
 			test_cmp .git/expect.$fn .git/actual.$fn
 		fi
 	'
-
-	return $?
 }
 
 uc_values="false"
@@ -692,13 +664,13 @@ do
 		if test $fsm_val = false
 		then
 			test_expect_success "Matrix[uc:$uc_val][fsm:$fsm_val] disable fsmonitor" '
-				test_might_fail git config --unset core.useBuiltinFSMonitor &&
+				test_unconfig core.fsmonitor &&
 				git update-index --no-fsmonitor &&
-				test_might_fail git fsmonitor--daemon stop 2>/dev/null
+				test_might_fail git fsmonitor--daemon stop
 			'
 		else
 			test_expect_success "Matrix[uc:$uc_val][fsm:$fsm_val] enable fsmonitor" '
-				git config core.useBuiltinFSMonitor true &&
+				git config core.fsmonitor true &&
 				git fsmonitor--daemon start &&
 				git update-index --fsmonitor
 			'
@@ -711,35 +683,23 @@ do
 		matrix_try $uc_val $fsm_val file_to_directory
 		matrix_try $uc_val $fsm_val directory_to_file
 
-		# NEEDSWORK: On Windows the untracked-cache is buggy when FSMonitor
-		# is DISABLED.  Turn off a few test that cause it problems until
-		# we can debug it.
-		#
-		try_moves="true"
-		test_have_prereq UNTRACKED_CACHE,WINDOWS && \
-			test $uc_val = true && \
-			test $fsm_val = false && \
-			try_moves="false"
-		if test $try_moves = true
-		then
-			matrix_try $uc_val $fsm_val move_directory_contents_deeper
-			matrix_try $uc_val $fsm_val move_directory_up
-			matrix_try $uc_val $fsm_val move_directory
-		fi
+		matrix_try $uc_val $fsm_val move_directory_contents_deeper
+		matrix_try $uc_val $fsm_val move_directory_up
+		matrix_try $uc_val $fsm_val move_directory
 
 		if test $fsm_val = true
 		then
 			test_expect_success "Matrix[uc:$uc_val][fsm:$fsm_val] disable fsmonitor at end" '
-				test_might_fail git config --unset core.useBuiltinFSMonitor &&
+				test_unconfig core.fsmonitor &&
 				git update-index --no-fsmonitor &&
-				test_might_fail git fsmonitor--daemon stop 2>/dev/null
+				test_might_fail git fsmonitor--daemon stop
 			'
 		fi
 	done
 done
 
 # Test Unicode UTF-8 characters in the pathname of the working
-# directory.  Use of "*A()" routines rather than "*W()" routines
+# directory root.  Use of "*A()" routines rather than "*W()" routines
 # on Windows can sometimes lead to odd failures.
 #
 u1=$(printf "u_c3_a6__\xC3\xA6")
@@ -747,18 +707,202 @@ u2=$(printf "u_e2_99_ab__\xE2\x99\xAB")
 u_values="$u1 $u2"
 for u in $u_values
 do
-	test_expect_success "Unicode path: $u" '
+	test_expect_success "Unicode in repo root path: $u" '
 		test_when_finished "stop_daemon_delete_repo $u" &&
 
 		git init "$u" &&
 		echo 1 >"$u"/file1 &&
 		git -C "$u" add file1 &&
-		git -C "$u" config core.useBuiltinFSMonitor true &&
+		git -C "$u" config core.fsmonitor true &&
 
-		start_daemon "$u" &&
+		start_daemon -C "$u" &&
 		git -C "$u" status >actual &&
 		grep "new file:   file1" actual
 	'
 done
+
+# Test fsmonitor interaction with submodules.
+#
+# If we start the daemon in the super, it will see FS events for
+# everything in the working directory cone and this includes any
+# files/directories contained *within* the submodules.
+#
+# A `git status` at top level will get events for items within the
+# submodule and ignore them, since they aren't named in the index
+# of the super repo.  This makes the fsmonitor response a little
+# noisy, but it doesn't alter the correctness of the state of the
+# super-proper.
+#
+# When we have submodules, `git status` normally does a recursive
+# status on each of the submodules and adds a summary row for any
+# dirty submodules.  (See the "S..." bits in porcelain V2 output.)
+#
+# It is therefore important that the top level status not be tricked
+# by the FSMonitor response to skip those recursive calls.
+
+my_match_and_clean () {
+	git -C super --no-optional-locks status --porcelain=v2 >actual.with &&
+	git -C super --no-optional-locks -c core.fsmonitor=false \
+		status --porcelain=v2 >actual.without &&
+	test_cmp actual.with actual.without &&
+
+	git -C super/dir_1/dir_2/sub reset --hard &&
+	git -C super/dir_1/dir_2/sub clean -d -f
+}
+
+test_expect_success "Submodule" '
+	test_when_finished "git -C super fsmonitor--daemon stop" &&
+
+	git init "super" &&
+	echo x >super/file_1 &&
+	echo y >super/file_2 &&
+	echo z >super/file_3 &&
+	mkdir super/dir_1 &&
+	echo a >super/dir_1/file_11 &&
+	echo b >super/dir_1/file_12 &&
+	mkdir super/dir_1/dir_2 &&
+	echo a >super/dir_1/dir_2/file_21 &&
+	echo b >super/dir_1/dir_2/file_22 &&
+	git -C super add . &&
+	git -C super commit -m "initial super commit" &&
+
+	git init "sub" &&
+	echo x >sub/file_x &&
+	echo y >sub/file_y &&
+	echo z >sub/file_z &&
+	mkdir sub/dir_x &&
+	echo a >sub/dir_x/file_a &&
+	echo b >sub/dir_x/file_b &&
+	mkdir sub/dir_x/dir_y &&
+	echo a >sub/dir_x/dir_y/file_a &&
+	echo b >sub/dir_x/dir_y/file_b &&
+	git -C sub add . &&
+	git -C sub commit -m "initial sub commit" &&
+
+	git -C super submodule add ../sub ./dir_1/dir_2/sub &&
+	git -C super commit -m "add sub" &&
+
+	start_daemon -C super &&
+	git -C super config core.fsmonitor true &&
+	git -C super update-index --fsmonitor &&
+	git -C super status &&
+
+	# Now run pairs of commands w/ and w/o FSMonitor while we make
+	# some dirt in the submodule and confirm matching output.
+
+	# Completely clean status.
+	my_match_and_clean &&
+
+	# .M S..U
+	echo z >super/dir_1/dir_2/sub/dir_x/dir_y/foobar_u &&
+	my_match_and_clean &&
+
+	# .M S.M.
+	echo z >super/dir_1/dir_2/sub/dir_x/dir_y/foobar_m &&
+	git -C super/dir_1/dir_2/sub add . &&
+	my_match_and_clean &&
+
+	# .M S.M.
+	echo z >>super/dir_1/dir_2/sub/dir_x/dir_y/file_a &&
+	git -C super/dir_1/dir_2/sub add . &&
+	my_match_and_clean &&
+
+	# .M SC..
+	echo z >>super/dir_1/dir_2/sub/dir_x/dir_y/file_a &&
+	git -C super/dir_1/dir_2/sub add . &&
+	git -C super/dir_1/dir_2/sub commit -m "SC.." &&
+	my_match_and_clean
+'
+
+# On a case-insensitive file system, confirm that the daemon
+# notices when the .git directory is moved/renamed/deleted
+# regardless of how it is spelled in the the FS event.
+# That is, does the FS event receive the spelling of the
+# operation or does it receive the spelling preserved with
+# the file/directory.
+#
+test_expect_success CASE_INSENSITIVE_FS 'case insensitive+preserving' '
+#	test_when_finished "stop_daemon_delete_repo test_insensitive" &&
+
+	git init test_insensitive &&
+
+	start_daemon -C test_insensitive --tf "$PWD/insensitive.trace" &&
+
+	mkdir -p test_insensitive/abc/def &&
+	echo xyz >test_insensitive/ABC/DEF/xyz &&
+
+	test_path_is_dir test_insensitive/.git &&
+	test_path_is_dir test_insensitive/.GIT &&
+
+	# Rename .git using an alternate spelling to verify that that
+	# daemon detects it and automatically shuts down.
+	mv test_insensitive/.GIT test_insensitive/.FOO &&
+	sleep 1 &&
+	mv test_insensitive/.FOO test_insensitive/.git &&
+	test_must_fail git -C test_insensitive fsmonitor--daemon status &&
+
+	# Verify that events were reported using on-disk spellings of the
+	# directories and files that we touched.  We may or may not get a
+	# trailing slash on modified directories.
+	#
+	egrep "^event: abc/?$"       ./insensitive.trace &&
+	egrep "^event: abc/def/?$"   ./insensitive.trace &&
+	egrep "^event: abc/def/xyz$" ./insensitive.trace
+'
+
+# The variable "unicode_debug" is defined in the following library
+# script to dump information about how the (OS, FS) handles Unicode
+# composition.  Uncomment the following line if you want to enable it.
+#
+# unicode_debug=true
+
+. "$TEST_DIRECTORY/lib-unicode-nfc-nfd.sh"
+
+# See if the OS or filesystem does NFC/NFD aliasing/munging.
+#
+# The daemon should err on the side of caution and send BOTH the
+# NFC and NFD forms.  It does not know the original spelling of
+# the pathname (how the user thinks it should be spelled), so
+# emit both and let the client decide (when necessary).  This is
+# similar to "core.precomposeUnicode".
+#
+test_expect_success !UNICODE_COMPOSITION_SENSITIVE 'Unicode nfc/nfd' '
+	test_when_finished "stop_daemon_delete_repo test_unicode" &&
+
+	git init test_unicode &&
+
+	start_daemon -C test_unicode --tf "$PWD/unicode.trace" &&
+
+	# Create a directory using an NFC spelling.
+	#
+	mkdir test_unicode/nfc &&
+	mkdir test_unicode/nfc/c_${utf8_nfc} &&
+
+	# Create a directory using an NFD spelling.
+	#
+	mkdir test_unicode/nfd &&
+	mkdir test_unicode/nfd/d_${utf8_nfd} &&
+
+	git -C test_unicode fsmonitor--daemon stop &&
+
+	if test_have_prereq UNICODE_NFC_PRESERVED
+	then
+		# We should have seen NFC event from OS.
+		# We should not have synthesized an NFD event.
+		egrep    "^event: nfc/c_${utf8_nfc}/?$" ./unicode.trace &&
+		egrep -v "^event: nfc/c_${utf8_nfd}/?$" ./unicode.trace
+	else
+		# We should have seen NFD event from OS.
+		# We should have synthesized an NFC event.
+		egrep "^event: nfc/c_${utf8_nfd}/?$" ./unicode.trace &&
+		egrep "^event: nfc/c_${utf8_nfc}/?$" ./unicode.trace
+	fi &&
+
+	# We assume UNICODE_NFD_PRESERVED.
+	# We should have seen explicit NFD from OS.
+	# We should have synthesized an NFC event.
+	egrep "^event: nfd/d_${utf8_nfd}/?$" ./unicode.trace &&
+	egrep "^event: nfd/d_${utf8_nfc}/?$" ./unicode.trace
+'
 
 test_done

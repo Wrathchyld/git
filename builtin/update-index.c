@@ -607,7 +607,7 @@ static struct cache_entry *read_one_ent(const char *which,
 			error("%s: not in %s branch.", path, which);
 		return NULL;
 	}
-	if (mode == S_IFDIR) {
+	if (!the_index.sparse_index && mode == S_IFDIR) {
 		if (which)
 			error("%s: not a blob in %s branch.", path, which);
 		return NULL;
@@ -744,8 +744,6 @@ static int do_reupdate(int ac, const char **av,
 		 */
 		has_head = 0;
  redo:
-	/* TODO: audit for interaction with sparse-index. */
-	ensure_full_index(&the_index);
 	for (pos = 0; pos < active_nr; pos++) {
 		const struct cache_entry *ce = active_cache[pos];
 		struct cache_entry *old = NULL;
@@ -762,6 +760,16 @@ static int do_reupdate(int ac, const char **av,
 			discard_cache_entry(old);
 			continue; /* unchanged */
 		}
+
+		/* At this point, we know the contents of the sparse directory are
+		 * modified with respect to HEAD, so we expand the index and restart
+		 * to process each path individually
+		 */
+		if (S_ISSPARSEDIR(ce->ce_mode)) {
+			ensure_full_index(&the_index);
+			goto redo;
+		}
+
 		/* Be careful.  The working tree may not have the
 		 * path anymore, in which case, under 'allow_remove',
 		 * or worse yet 'allow_replace', active_nr may decrease.
@@ -788,6 +796,17 @@ static int refresh(struct refresh_params *o, unsigned int flag)
 	setup_work_tree();
 	read_cache();
 	*o->has_errors |= refresh_cache(o->flags | flag);
+	if (has_racy_timestamp(&the_index)) {
+		/*
+		 * Even if nothing else has changed, updating the file
+		 * increases the chance that racy timestamps become
+		 * non-racy, helping future run-time performance.
+		 * We do that even in case of "errors" returned by
+		 * refresh_cache() as these are no actual errors.
+		 * cmd_status() does the same.
+		 */
+		active_cache_changed |= SOMETHING_CHANGED;
+	}
 	return 0;
 }
 
@@ -1078,6 +1097,9 @@ int cmd_update_index(int argc, const char **argv, const char *prefix)
 
 	git_config(git_default_config, NULL);
 
+	prepare_repo_settings(r);
+	the_repository->settings.command_requires_full_index = 0;
+
 	/* we will diagnose later if it turns out that we need to update it */
 	newfd = hold_locked_index(&lock_file, 0);
 	if (newfd < 0)
@@ -1089,15 +1111,18 @@ int cmd_update_index(int argc, const char **argv, const char *prefix)
 
 	the_index.updated_skipworktree = 1;
 
-	/* we might be adding many objects to the object database */
-	plug_bulk_checkin();
-
 	/*
 	 * Custom copy of parse_options() because we want to handle
 	 * filename arguments as they come.
 	 */
 	parse_options_start(&ctx, argc, argv, prefix,
 			    options, PARSE_OPT_STOP_AT_NON_OPTION);
+
+	/*
+	 * Allow the object layer to optimize adding multiple objects in
+	 * a batch.
+	 */
+	begin_odb_transaction();
 	while (ctx.argc) {
 		if (parseopt_state != PARSE_OPT_DONE)
 			parseopt_state = parse_options_step(&ctx, options,
@@ -1149,6 +1174,17 @@ int cmd_update_index(int argc, const char **argv, const char *prefix)
 		the_index.version = preferred_index_format;
 	}
 
+	/*
+	 * It is possible, though unlikely, that a caller could use the verbose
+	 * output to synchronize with addition of objects to the object
+	 * database. The current implementation of ODB transactions leaves
+	 * objects invisible while a transaction is active, so end the
+	 * transaction here if verbose output is enabled.
+	 */
+
+	if (verbose)
+		end_odb_transaction();
+
 	if (read_from_stdin) {
 		struct strbuf buf = STRBUF_INIT;
 		struct strbuf unquoted = STRBUF_INIT;
@@ -1172,8 +1208,12 @@ int cmd_update_index(int argc, const char **argv, const char *prefix)
 		strbuf_release(&buf);
 	}
 
-	/* by now we must have added all of the new objects */
-	unplug_bulk_checkin();
+	/*
+	 * By now we have added all of the new objects
+	 */
+	if (!verbose)
+		end_odb_transaction();
+
 	if (split_index > 0) {
 		if (git_config_get_split_index() == 0)
 			warning(_("core.splitIndex is set to false; "
@@ -1222,31 +1262,19 @@ int cmd_update_index(int argc, const char **argv, const char *prefix)
 	if (fsmonitor > 0) {
 		enum fsmonitor_mode fsm_mode = fsm_settings__get_mode(r);
 
-		if (fsm_mode == FSMONITOR_MODE_INCOMPATIBLE) {
-			struct strbuf buf_reason = STRBUF_INIT;
-			fsm_settings__get_reason(r, &buf_reason);
-			error("%s", buf_reason.buf);
-			strbuf_release(&buf_reason);
-			return -1;
-		}
+		if (fsm_settings__error_if_incompatible(the_repository))
+			return 1;
 
 		if (fsm_mode == FSMONITOR_MODE_DISABLED) {
-			warning(_("core.useBuiltinFSMonitor is unset; "
-				"set it if you really want to enable the "
-				"builtin fsmonitor"));
 			warning(_("core.fsmonitor is unset; "
-				"set it if you really want to enable the "
-				"hook-based fsmonitor"));
+				"set it if you really want to "
+				"enable fsmonitor"));
 		}
 		add_fsmonitor(&the_index);
 		report(_("fsmonitor enabled"));
 	} else if (!fsmonitor) {
 		enum fsmonitor_mode fsm_mode = fsm_settings__get_mode(r);
-		if (fsm_mode == FSMONITOR_MODE_IPC)
-			warning(_("core.useBuiltinFSMonitor is set; "
-				"remove it if you really want to "
-				"disable fsmonitor"));
-		if (fsm_mode == FSMONITOR_MODE_HOOK)
+		if (fsm_mode > FSMONITOR_MODE_DISABLED)
 			warning(_("core.fsmonitor is set; "
 				"remove it if you really want to "
 				"disable fsmonitor"));

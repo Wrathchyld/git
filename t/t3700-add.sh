@@ -36,22 +36,30 @@ test_expect_success \
     'Test that "git add -- -q" works' \
     'touch -- -q && git add -- -q'
 
-test_expect_success 'git add: core.fsyncobjectfiles=batch' "
-	test_create_unique_files 2 4 fsync-files &&
-	git -c core.fsyncobjectfiles=batch add -- ./fsync-files/ &&
-	rm -f fsynced_files &&
-	git ls-files --stage fsync-files/ > fsynced_files &&
-	test_line_count = 8 fsynced_files &&
-	awk -- '{print \$2}' fsynced_files | xargs -n1 git cat-file -e
+BATCH_CONFIGURATION='-c core.fsync=loose-object -c core.fsyncmethod=batch'
+
+test_expect_success 'git add: core.fsyncmethod=batch' "
+	test_create_unique_files 2 4 files_base_dir1 &&
+	GIT_TEST_FSYNC=1 git $BATCH_CONFIGURATION add -- ./files_base_dir1/ &&
+	git ls-files --stage files_base_dir1/ |
+	test_parse_ls_files_stage_oids >added_files_oids &&
+
+	# We created 2 subdirs with 4 files each (8 files total) above
+	test_line_count = 8 added_files_oids &&
+	git cat-file --batch-check='%(objectname)' <added_files_oids >added_files_actual &&
+	test_cmp added_files_oids added_files_actual
 "
 
-test_expect_success 'git update-index: core.fsyncobjectfiles=batch' "
-	test_create_unique_files 2 4 fsync-files2 &&
-	find fsync-files2 ! -type d -print | xargs git -c core.fsyncobjectfiles=batch update-index --add -- &&
-	rm -f fsynced_files2 &&
-	git ls-files --stage fsync-files2/ > fsynced_files2 &&
-	test_line_count = 8 fsynced_files2 &&
-	awk -- '{print \$2}' fsynced_files2 | xargs -n1 git cat-file -e
+test_expect_success 'git update-index: core.fsyncmethod=batch' "
+	test_create_unique_files 2 4 files_base_dir2 &&
+	find files_base_dir2 ! -type d -print | xargs git $BATCH_CONFIGURATION update-index --add -- &&
+	git ls-files --stage files_base_dir2 |
+	test_parse_ls_files_stage_oids >added_files2_oids &&
+
+	# We created 2 subdirs with 4 files each (8 files total) above
+	test_line_count = 8 added_files2_oids &&
+	git cat-file --batch-check='%(objectname)' <added_files2_oids >added_files2_actual &&
+	test_cmp added_files2_oids added_files2_actual
 "
 
 test_expect_success \

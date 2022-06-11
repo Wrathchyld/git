@@ -741,7 +741,7 @@ char *interpolate_path(const char *path, int real_home)
 
 #ifdef __MINGW32__
 	if (path[0] == '/') {
-		warning(_("encountered old-style '%s' that should be '%%(prefix)%s'"), path, path);
+		warning(_("encountered old-style '%s' that should be '%%(prefix)/%s'"), path, path);
 		return system_path(path + 1);
 	}
 #endif
@@ -1231,11 +1231,15 @@ int longest_ancestor_length(const char *path, struct string_list *prefixes)
 		const char *ceil = prefixes->items[i].string;
 		int len = strlen(ceil);
 
-		if (len == 1 && ceil[0] == '/')
-			len = 0; /* root matches anything, with length 0 */
-		else if (!strncmp(path, ceil, len) && path[len] == '/')
-			; /* match of length len */
-		else
+		/*
+		 * For root directories (`/`, `C:/`, `//server/share/`)
+		 * adjust the length to exclude the trailing slash.
+		 */
+		if (len > 0 && ceil[len - 1] == '/')
+			len--;
+
+		if (strncmp(path, ceil, len) ||
+		    path[len] != '/' || !path[len + 1])
 			continue; /* no match */
 
 		if (len > max_len)
