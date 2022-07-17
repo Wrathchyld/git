@@ -1110,8 +1110,8 @@ int cmd_rebase(int argc, const char **argv, const char *prefix)
 			PARSE_OPT_NOARG | PARSE_OPT_NONEG,
 			parse_opt_interactive),
 		OPT_SET_INT_F('p', "preserve-merges", &preserve_merges_selected,
-			      N_("(DEPRECATED) try to recreate merges instead of "
-				 "ignoring them"),
+			      N_("(REMOVED) was: try to recreate merges "
+				 "instead of ignoring them"),
 			      1, PARSE_OPT_HIDDEN),
 		OPT_RERERE_AUTOUPDATE(&options.allow_rerere_autoupdate),
 		OPT_CALLBACK_F(0, "empty", &options, "{drop,keep,ask}",
@@ -1182,18 +1182,16 @@ int cmd_rebase(int argc, const char **argv, const char *prefix)
 	} else if (is_directory(merge_dir())) {
 		strbuf_reset(&buf);
 		strbuf_addf(&buf, "%s/rewritten", merge_dir());
-		if (is_directory(buf.buf)) {
-			die("`rebase --preserve-merges` (-p) is no longer supported.\n"
-			"You still have a `.git/rebase-merge/rewritten` directory, \n"
-			"indicating a `rebase preserve-merge` is still in progress.\n");
+		if (!(action == ACTION_ABORT) && is_directory(buf.buf)) {
+			die(_("`rebase --preserve-merges` (-p) is no longer supported.\n"
+			"Use `git rebase --abort` to terminate current rebase.\n"
+			"Or downgrade to v2.33, or earlier, to complete the rebase."));
 		} else {
 			strbuf_reset(&buf);
 			strbuf_addf(&buf, "%s/interactive", merge_dir());
-			if(file_exists(buf.buf)) {
-				options.type = REBASE_MERGE;
+			options.type = REBASE_MERGE;
+			if (file_exists(buf.buf))
 				options.flags |= REBASE_INTERACTIVE_EXPLICIT;
-			} else
-				options.type = REBASE_MERGE;
 		}
 		options.state_dir = merge_dir();
 	}
@@ -1208,9 +1206,8 @@ int cmd_rebase(int argc, const char **argv, const char *prefix)
 
 	if (preserve_merges_selected)
 		die(_("--preserve-merges was replaced by --rebase-merges\n"
-			"Also, check your `pull` configuration settings\n"
-			"`git config --show-scope --show-origin --get-regexp 'pull.*'`\n"
-			"which may also invoke this option."));
+			"Note: Your `pull.rebase` configuration may also be set to 'preserve',\n"
+			"which is no longer supported; use 'merges' instead"));
 
 	if (action != ACTION_NONE && total_argc != 2) {
 		usage_with_options(builtin_rebase_usage,
@@ -1588,33 +1585,6 @@ int cmd_rebase(int argc, const char **argv, const char *prefix)
 		options.upstream_arg = "--root";
 	}
 
-	/* Make sure the branch to rebase onto is valid. */
-	if (keep_base) {
-		strbuf_reset(&buf);
-		strbuf_addstr(&buf, options.upstream_name);
-		strbuf_addstr(&buf, "...");
-		options.onto_name = xstrdup(buf.buf);
-	} else if (!options.onto_name)
-		options.onto_name = options.upstream_name;
-	if (strstr(options.onto_name, "...")) {
-		if (get_oid_mb(options.onto_name, &merge_base) < 0) {
-			if (keep_base)
-				die(_("'%s': need exactly one merge base with branch"),
-				    options.upstream_name);
-			else
-				die(_("'%s': need exactly one merge base"),
-				    options.onto_name);
-		}
-		options.onto = lookup_commit_or_die(&merge_base,
-						    options.onto_name);
-	} else {
-		options.onto =
-			lookup_commit_reference_by_name(options.onto_name);
-		if (!options.onto)
-			die(_("Does not point to a valid commit '%s'"),
-				options.onto_name);
-	}
-
 	/*
 	 * If the branch to rebase is given, that is the branch we will rebase
 	 * branch_name -- branch/commit being rebased, or
@@ -1663,6 +1633,34 @@ int cmd_rebase(int argc, const char **argv, const char *prefix)
 			die(_("Could not resolve HEAD to a revision"));
 	} else
 		BUG("unexpected number of arguments left to parse");
+
+	/* Make sure the branch to rebase onto is valid. */
+	if (keep_base) {
+		strbuf_reset(&buf);
+		strbuf_addstr(&buf, options.upstream_name);
+		strbuf_addstr(&buf, "...");
+		strbuf_addstr(&buf, branch_name);
+		options.onto_name = xstrdup(buf.buf);
+	} else if (!options.onto_name)
+		options.onto_name = options.upstream_name;
+	if (strstr(options.onto_name, "...")) {
+		if (get_oid_mb(options.onto_name, &merge_base) < 0) {
+			if (keep_base)
+				die(_("'%s': need exactly one merge base with branch"),
+				    options.upstream_name);
+			else
+				die(_("'%s': need exactly one merge base"),
+				    options.onto_name);
+		}
+		options.onto = lookup_commit_or_die(&merge_base,
+						    options.onto_name);
+	} else {
+		options.onto =
+			lookup_commit_reference_by_name(options.onto_name);
+		if (!options.onto)
+			die(_("Does not point to a valid commit '%s'"),
+				options.onto_name);
+	}
 
 	if (options.fork_point > 0) {
 		struct commit *head =

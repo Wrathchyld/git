@@ -15,15 +15,15 @@ test_create_unique_files () {
 	local dirs="$1" &&
 	local files="$2" &&
 	local basedir="$3" &&
-	local counter=0 &&
+	local counter="0" &&
 	local i &&
 	local j &&
 	test_tick &&
-	local basedata=$basedir$test_tick &&
+	local basedata="$basedir$test_tick" &&
 	rm -rf "$basedir" &&
 	for i in $(test_seq $dirs)
 	do
-		local dir=$basedir/dir$i &&
+		local dir="$basedir/dir$i" &&
 		mkdir -p "$dir" &&
 		for j in $(test_seq $files)
 		do

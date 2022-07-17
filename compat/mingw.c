@@ -745,6 +745,7 @@ static int is_local_named_pipe_path(const char *filename)
 
 int mingw_open (const char *filename, int oflags, ...)
 {
+	static int append_atomically = -1;
 	typedef int (*open_fn_t)(wchar_t const *wfilename, int oflags, ...);
 	va_list args;
 	unsigned mode;
@@ -761,7 +762,16 @@ int mingw_open (const char *filename, int oflags, ...)
 		return -1;
 	}
 
-	if ((oflags & O_APPEND) && !is_local_named_pipe_path(filename))
+	/*
+	 * Only set append_atomically to default value(1) when repo is initialized
+	 * and fail to get config value
+	 */
+	if (append_atomically < 0 && the_repository && the_repository->commondir &&
+		git_config_get_bool("windows.appendatomically", &append_atomically))
+		append_atomically = 1;
+
+	if (append_atomically && (oflags & O_APPEND) &&
+		!is_local_named_pipe_path(filename))
 		open_fn = mingw_open_append;
 	else
 		open_fn = _wopen;
@@ -910,8 +920,26 @@ ssize_t mingw_write(int fd, const void *buf, size_t len)
 		HANDLE h = (HANDLE) _get_osfhandle(fd);
 		if (GetFileType(h) == FILE_TYPE_PIPE)
 			errno = EPIPE;
-		else
+		else {
+			wchar_t path[MAX_LONG_PATH];
+			DWORD ret = GetFinalPathNameByHandleW(h, path,
+							ARRAY_SIZE(path), 0);
+			UINT drive_type = ret > 0 && ret < ARRAY_SIZE(path) ?
+				GetDriveTypeW(path) : DRIVE_UNKNOWN;
+
+			/*
+			 * The default atomic append causes such an error on
+			 * network file systems, in such a case, it should be
+			 * turned off via config.
+			 *
+			 * `drive_type` of UNC path: DRIVE_NO_ROOT_DIR
+			 */
+			if (DRIVE_NO_ROOT_DIR == drive_type || DRIVE_REMOTE == drive_type)
+				warning("invalid write operation detected; you may try:\n"
+					"\n\tgit config windows.appendAtomically false");
+
 			errno = EINVAL;
+		}
 	}
 
 	return result;
@@ -1279,7 +1307,7 @@ char *mingw_mktemp(char *template)
 int mkstemp(char *template)
 {
 	char *filename = mktemp(template);
-	if (filename == NULL)
+	if (!filename)
 		return -1;
 	return open(filename, O_RDWR | O_CREAT, 0600);
 }
@@ -2823,7 +2851,7 @@ int setitimer(int type, struct itimerval *in, struct itimerval *out)
 	static const struct timeval zero;
 	static int atexit_done;
 
-	if (out != NULL)
+	if (out)
 		return errno = EINVAL,
 			error("setitimer param 3 != NULL not implemented");
 	if (!is_timeval_eq(&in->it_interval, &zero) &&
@@ -2852,7 +2880,7 @@ int sigaction(int sig, struct sigaction *in, struct sigaction *out)
 	if (sig != SIGALRM)
 		return errno = EINVAL,
 			error("sigaction only implemented for SIGALRM");
-	if (out != NULL)
+	if (out)
 		return errno = EINVAL,
 			error("sigaction: param 3 != NULL not implemented");
 
@@ -3486,6 +3514,22 @@ static PSID get_current_user_sid(void)
 	return result;
 }
 
+static int acls_supported(const char *path)
+{
+	size_t offset = offset_1st_component(path);
+	WCHAR wroot[MAX_PATH];
+	DWORD file_system_flags;
+
+	if (offset &&
+	    xutftowcs_path_ex(wroot, path, MAX_PATH, offset,
+			      MAX_PATH, 0) > 0 &&
+	    GetVolumeInformationW(wroot, NULL, 0, NULL, NULL,
+				  &file_system_flags, NULL, 0))
+		return !!(file_system_flags & FILE_PERSISTENT_ACLS);
+
+	return 0;
+}
+
 int is_path_owned_by_current_sid(const char *path)
 {
 	WCHAR wpath[MAX_PATH];
@@ -3541,7 +3585,14 @@ int is_path_owned_by_current_sid(const char *path)
 			 * okay, too.
 			 */
 			result = 1;
-		else if (git_env_bool("GIT_TEST_DEBUG_UNSAFE_DIRECTORIES", 0)) {
+		else if (IsWellKnownSid(sid, WinWorldSid) &&
+			 git_env_bool("GIT_TEST_DEBUG_UNSAFE_DIRECTORIES", 0) &&
+			 !acls_supported(path)) {
+			/*
+			 * On FAT32 volumes, ownership is not actually recorded.
+			 */
+			warning("'%s' is on a file system that does not record ownership", path);
+		} else if (git_env_bool("GIT_TEST_DEBUG_UNSAFE_DIRECTORIES", 0)) {
 			LPSTR str1, str2, to_free1 = NULL, to_free2 = NULL;
 
 			if (ConvertSidToStringSidA(sid, &str1))
@@ -3671,7 +3722,7 @@ not_a_reserved_name:
 			}
 
 			c = path[i];
-			if (c && c != '.' && c != ':' && c != '/' && c != '\\')
+			if (c && c != '.' && c != ':' && !is_xplatform_dir_sep(c))
 				goto not_a_reserved_name;
 
 			/* contains reserved name */

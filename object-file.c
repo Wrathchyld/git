@@ -838,7 +838,7 @@ static void fill_alternate_refs_command(struct child_process *cmd,
 		}
 	}
 
-	strvec_pushv(&cmd->env_array, (const char **)local_repo_env);
+	strvec_pushv(&cmd->env, (const char **)local_repo_env);
 	cmd->out = -1;
 }
 
@@ -997,7 +997,7 @@ int has_loose_object_nonlocal(const struct object_id *oid)
 	return check_and_freshen_nonlocal(oid, 0);
 }
 
-static int has_loose_object(const struct object_id *oid)
+int has_loose_object(const struct object_id *oid)
 {
 	return check_and_freshen(oid, 0);
 }
@@ -1728,7 +1728,7 @@ void *read_object_file_extended(struct repository *r,
 		die(_("loose object %s (stored in %s) is corrupt"),
 		    oid_to_hex(repl), path);
 
-	if ((p = has_packed_and_bad(r, repl)) != NULL)
+	if ((p = has_packed_and_bad(r, repl)))
 		die(_("packed object %s (stored in %s) is corrupt"),
 		    oid_to_hex(repl), p->pack_name);
 	obj_read_unlock();
@@ -2039,6 +2039,8 @@ static int freshen_packed_object(const struct object_id *oid)
 {
 	struct pack_entry e;
 	if (!find_pack_entry(the_repository, oid, &e))
+		return 0;
+	if (e.p->is_cruft)
 		return 0;
 	if (e.p->freshened)
 		return 1;
@@ -2630,7 +2632,7 @@ int read_loose_object(const char *path,
 	}
 
 	if (unpack_loose_header(&stream, map, mapsize, hdr, sizeof(hdr),
-				NULL) < 0) {
+				NULL) != ULHR_OK) {
 		error(_("unable to unpack header of %s"), path);
 		goto out;
 	}

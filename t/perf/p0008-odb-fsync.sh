@@ -30,7 +30,8 @@ setup_repo () {
 }
 
 test_perf_fsync_cfgs () {
-	local method cfg &&
+	local method &&
+	local cfg &&
 	for method in none fsync batch writeout-only
 	do
 		case $method in

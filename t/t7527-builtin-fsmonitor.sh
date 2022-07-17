@@ -124,6 +124,36 @@ test_expect_success 'implicit daemon start' '
 	test_must_fail git -C test_implicit fsmonitor--daemon status
 '
 
+# Verify that the daemon has shutdown.  Spin a few seconds to
+# make the test a little more robust during CI testing.
+#
+# We're looking for an implicit shutdown, such as when we delete or
+# rename the ".git" directory.  Our delete/rename will cause a file
+# system event that the daemon will see and the daemon will
+# auto-shutdown as soon as it sees it.  But this is racy with our `git
+# fsmonitor--daemon status` commands (and we cannot use a cookie file
+# here to help us).  So spin a little and give the daemon a chance to
+# see the event.  (This is primarily for underpowered CI build/test
+# machines (where it might take a moment to wake and reschedule the
+# daemon process) to avoid false alarms during test runs.)
+#
+IMPLICIT_TIMEOUT=5
+
+verify_implicit_shutdown () {
+	r=$1 &&
+
+	k=0 &&
+	while test "$k" -lt $IMPLICIT_TIMEOUT
+	do
+		git -C $r fsmonitor--daemon status || return 0
+
+		sleep 1
+		k=$(( $k + 1 ))
+	done &&
+
+	return 1
+}
+
 test_expect_success 'implicit daemon stop (delete .git)' '
 	test_when_finished "stop_daemon_delete_repo test_implicit_1" &&
 
@@ -142,10 +172,9 @@ test_expect_success 'implicit daemon stop (delete .git)' '
 	#     This would make the test result dependent upon whether we
 	#     were using fsmonitor on our development worktree.
 	#
-	sleep 1 &&
 	mkdir test_implicit_1/.git &&
 
-	test_must_fail git -C test_implicit_1 fsmonitor--daemon status
+	verify_implicit_shutdown test_implicit_1
 '
 
 test_expect_success 'implicit daemon stop (rename .git)' '
@@ -160,10 +189,9 @@ test_expect_success 'implicit daemon stop (rename .git)' '
 
 	# See [1] above.
 	#
-	sleep 1 &&
 	mkdir test_implicit_2/.git &&
 
-	test_must_fail git -C test_implicit_2 fsmonitor--daemon status
+	verify_implicit_shutdown test_implicit_2
 '
 
 # File systems on Windows may or may not have shortnames.
@@ -194,13 +222,11 @@ test_expect_success MINGW,SHORTNAMES 'implicit daemon stop (rename GIT~1)' '
 	#
 	mv test_implicit_1s/GIT~1 test_implicit_1s/.gitxyz &&
 
-	sleep 1 &&
-	# put it back so that our status will not crawl out to our
-	# parent directory.
+	# See [1] above.
 	# this moves {.gitxyz, GITXYZ~1} to {.git, GIT~1}.
 	mv test_implicit_1s/.gitxyz test_implicit_1s/.git &&
 
-	test_must_fail git -C test_implicit_1s fsmonitor--daemon status
+	verify_implicit_shutdown test_implicit_1s
 '
 
 # Here we first create a file with LONGNAME of "GIT~1" before
@@ -223,12 +249,10 @@ test_expect_success MINGW,SHORTNAMES 'implicit daemon stop (rename GIT~2)' '
 	#
 	mv test_implicit_1s2/GIT~2 test_implicit_1s2/.gitxyz &&
 
-	sleep 1 &&
-	# put it back so that our status will not crawl out to our
-	# parent directory.
+	# See [1] above.
 	mv test_implicit_1s2/.gitxyz test_implicit_1s2/.git &&
 
-	test_must_fail git -C test_implicit_1s2 fsmonitor--daemon status
+	verify_implicit_shutdown test_implicit_1s2
 '
 
 test_expect_success 'cannot start multiple daemons' '
@@ -707,7 +731,7 @@ u2=$(printf "u_e2_99_ab__\xE2\x99\xAB")
 u_values="$u1 $u2"
 for u in $u_values
 do
-	test_expect_success "Unicode in repo root path: $u" '
+	test_expect_success "unicode in repo root path: $u" '
 		test_when_finished "stop_daemon_delete_repo $u" &&
 
 		git init "$u" &&
@@ -738,7 +762,46 @@ done
 # dirty submodules.  (See the "S..." bits in porcelain V2 output.)
 #
 # It is therefore important that the top level status not be tricked
-# by the FSMonitor response to skip those recursive calls.
+# by the FSMonitor response to skip those recursive calls.  That is,
+# even if FSMonitor says that the mtime of the submodule directory
+# hasn't changed and it could be implicitly marked valid, we must
+# not take that shortcut.  We need to force the recusion into the
+# submodule so that we get a summary of the status *within* the
+# submodule.
+
+create_super () {
+	super="$1" &&
+
+	git init "$super" &&
+	echo x >"$super/file_1" &&
+	echo y >"$super/file_2" &&
+	echo z >"$super/file_3" &&
+	mkdir "$super/dir_1" &&
+	echo a >"$super/dir_1/file_11" &&
+	echo b >"$super/dir_1/file_12" &&
+	mkdir "$super/dir_1/dir_2" &&
+	echo a >"$super/dir_1/dir_2/file_21" &&
+	echo b >"$super/dir_1/dir_2/file_22" &&
+	git -C "$super" add . &&
+	git -C "$super" commit -m "initial $super commit"
+}
+
+create_sub () {
+	sub="$1" &&
+
+	git init "$sub" &&
+	echo x >"$sub/file_x" &&
+	echo y >"$sub/file_y" &&
+	echo z >"$sub/file_z" &&
+	mkdir "$sub/dir_x" &&
+	echo a >"$sub/dir_x/file_a" &&
+	echo b >"$sub/dir_x/file_b" &&
+	mkdir "$sub/dir_x/dir_y" &&
+	echo a >"$sub/dir_x/dir_y/file_a" &&
+	echo b >"$sub/dir_x/dir_y/file_b" &&
+	git -C "$sub" add . &&
+	git -C "$sub" commit -m "initial $sub commit"
+}
 
 my_match_and_clean () {
 	git -C super --no-optional-locks status --porcelain=v2 >actual.with &&
@@ -750,34 +813,13 @@ my_match_and_clean () {
 	git -C super/dir_1/dir_2/sub clean -d -f
 }
 
-test_expect_success "Submodule" '
-	test_when_finished "git -C super fsmonitor--daemon stop" &&
+test_expect_success 'submodule always visited' '
+	test_when_finished "git -C super fsmonitor--daemon stop; \
+			    rm -rf super; \
+			    rm -rf sub" &&
 
-	git init "super" &&
-	echo x >super/file_1 &&
-	echo y >super/file_2 &&
-	echo z >super/file_3 &&
-	mkdir super/dir_1 &&
-	echo a >super/dir_1/file_11 &&
-	echo b >super/dir_1/file_12 &&
-	mkdir super/dir_1/dir_2 &&
-	echo a >super/dir_1/dir_2/file_21 &&
-	echo b >super/dir_1/dir_2/file_22 &&
-	git -C super add . &&
-	git -C super commit -m "initial super commit" &&
-
-	git init "sub" &&
-	echo x >sub/file_x &&
-	echo y >sub/file_y &&
-	echo z >sub/file_z &&
-	mkdir sub/dir_x &&
-	echo a >sub/dir_x/file_a &&
-	echo b >sub/dir_x/file_b &&
-	mkdir sub/dir_x/dir_y &&
-	echo a >sub/dir_x/dir_y/file_a &&
-	echo b >sub/dir_x/dir_y/file_b &&
-	git -C sub add . &&
-	git -C sub commit -m "initial sub commit" &&
+	create_super super &&
+	create_sub sub &&
 
 	git -C super submodule add ../sub ./dir_1/dir_2/sub &&
 	git -C super commit -m "add sub" &&
@@ -814,6 +856,56 @@ test_expect_success "Submodule" '
 	my_match_and_clean
 '
 
+# If a submodule has a `sub/.git/` directory (rather than a file
+# pointing to the super's `.git/modules/sub`) and `core.fsmonitor`
+# turned on in the submodule and the daemon is not yet started in
+# the submodule, and someone does a `git submodule absorbgitdirs`
+# in the super, Git will recursively invoke `git submodule--helper`
+# to do the work and this may try to read the index.  This will
+# try to start the daemon in the submodule *and* pass (either
+# directly or via inheritance) the `--super-prefix` arg to the
+# `git fsmonitor--daemon start` command inside the submodule.
+# This causes a warning because fsmonitor--daemon does take that
+# global arg (see the table in git.c)
+#
+# This causes a warning when trying to start the daemon that is
+# somewhat confusing.  It does not seem to hurt anything because
+# the fsmonitor code maps the query failure into a trivial response
+# and does the work anyway.
+#
+# It would be nice to silence the warning, however.
+
+have_t2_error_event () {
+	log=$1
+	msg="fsmonitor--daemon doesnQt support --super-prefix" &&
+
+	tr '\047' Q <$1 | grep -e "$msg"
+}
+
+test_expect_success "stray submodule super-prefix warning" '
+	test_when_finished "rm -rf super; \
+			    rm -rf sub;   \
+			    rm super-sub.trace" &&
+
+	create_super super &&
+	create_sub sub &&
+
+	# Copy rather than submodule add so that we get a .git dir.
+	cp -R ./sub ./super/dir_1/dir_2/sub &&
+
+	git -C super/dir_1/dir_2/sub config core.fsmonitor true &&
+
+	git -C super submodule add ../sub ./dir_1/dir_2/sub &&
+	git -C super commit -m "add sub" &&
+
+	test_path_is_dir super/dir_1/dir_2/sub/.git &&
+
+	GIT_TRACE2_EVENT="$PWD/super-sub.trace" \
+		git -C super submodule absorbgitdirs &&
+
+	! have_t2_error_event super-sub.trace
+'
+
 # On a case-insensitive file system, confirm that the daemon
 # notices when the .git directory is moved/renamed/deleted
 # regardless of how it is spelled in the the FS event.
@@ -837,9 +929,11 @@ test_expect_success CASE_INSENSITIVE_FS 'case insensitive+preserving' '
 	# Rename .git using an alternate spelling to verify that that
 	# daemon detects it and automatically shuts down.
 	mv test_insensitive/.GIT test_insensitive/.FOO &&
-	sleep 1 &&
+
+	# See [1] above.
 	mv test_insensitive/.FOO test_insensitive/.git &&
-	test_must_fail git -C test_insensitive fsmonitor--daemon status &&
+
+	verify_implicit_shutdown test_insensitive &&
 
 	# Verify that events were reported using on-disk spellings of the
 	# directories and files that we touched.  We may or may not get a

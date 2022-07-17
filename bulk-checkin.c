@@ -17,7 +17,7 @@ static int odb_transaction_nesting;
 
 static struct tmp_objdir *bulk_fsync_objdir;
 
-static struct bulk_checkin_state {
+static struct bulk_checkin_packfile {
 	char *pack_tmp_name;
 	struct hashfile *f;
 	off_t offset;
@@ -26,7 +26,7 @@ static struct bulk_checkin_state {
 	struct pack_idx_entry **written;
 	uint32_t alloc_written;
 	uint32_t nr_written;
-} bulk_checkin_state;
+} bulk_checkin_packfile;
 
 static void finish_tmp_packfile(struct strbuf *basename,
 				const char *pack_tmp_name,
@@ -38,13 +38,13 @@ static void finish_tmp_packfile(struct strbuf *basename,
 	char *idx_tmp_name = NULL;
 
 	stage_tmp_packfiles(basename, pack_tmp_name, written_list, nr_written,
-			    pack_idx_opts, hash, &idx_tmp_name);
+			    NULL, pack_idx_opts, hash, &idx_tmp_name);
 	rename_tmp_packfile_idx(basename, &idx_tmp_name);
 
 	free(idx_tmp_name);
 }
 
-static void finish_bulk_checkin(struct bulk_checkin_state *state)
+static void flush_bulk_checkin_packfile(struct bulk_checkin_packfile *state)
 {
 	unsigned char hash[GIT_MAX_RAWSZ];
 	struct strbuf packname = STRBUF_INIT;
@@ -88,7 +88,7 @@ clear_exit:
 /*
  * Cleanup after batch-mode fsync_object_files.
  */
-static void do_batch_fsync(void)
+static void flush_batch_fsync(void)
 {
 	struct strbuf temp_path = STRBUF_INIT;
 	struct tempfile *temp;
@@ -119,7 +119,7 @@ static void do_batch_fsync(void)
 	bulk_fsync_objdir = NULL;
 }
 
-static int already_written(struct bulk_checkin_state *state, struct object_id *oid)
+static int already_written(struct bulk_checkin_packfile *state, struct object_id *oid)
 {
 	int i;
 
@@ -151,7 +151,7 @@ static int already_written(struct bulk_checkin_state *state, struct object_id *o
  * status before calling us just in case we ask it to call us again
  * with a new pack.
  */
-static int stream_to_pack(struct bulk_checkin_state *state,
+static int stream_to_pack(struct bulk_checkin_packfile *state,
 			  git_hash_ctx *ctx, off_t *already_hashed_to,
 			  int fd, size_t size, enum object_type type,
 			  const char *path, unsigned flags)
@@ -228,7 +228,7 @@ static int stream_to_pack(struct bulk_checkin_state *state,
 }
 
 /* Lazily create backing packfile for the state */
-static void prepare_to_stream(struct bulk_checkin_state *state,
+static void prepare_to_stream(struct bulk_checkin_packfile *state,
 			      unsigned flags)
 {
 	if (!(flags & HASH_WRITE_OBJECT) || state->f)
@@ -243,7 +243,7 @@ static void prepare_to_stream(struct bulk_checkin_state *state,
 		die_errno("unable to write pack header");
 }
 
-static int deflate_to_pack(struct bulk_checkin_state *state,
+static int deflate_to_pack(struct bulk_checkin_packfile *state,
 			   struct object_id *result_oid,
 			   int fd, size_t size,
 			   enum object_type type, const char *path,
@@ -290,7 +290,7 @@ static int deflate_to_pack(struct bulk_checkin_state *state,
 			BUG("should not happen");
 		hashfile_truncate(state->f, &checkpoint);
 		state->offset = checkpoint.offset;
-		finish_bulk_checkin(state);
+		flush_bulk_checkin_packfile(state);
 		if (lseek(fd, seekback, SEEK_SET) == (off_t) -1)
 			return error("cannot seek back");
 	}
@@ -335,7 +335,8 @@ void fsync_loose_object_bulk_checkin(int fd, const char *filename)
 	 * If we have an active ODB transaction, we issue a call that
 	 * cleans the filesystem page cache but avoids a hardware flush
 	 * command. Later on we will issue a single hardware flush
-	 * before as part of do_batch_fsync.
+	 * before renaming the objects to their final names as part of
+	 * flush_batch_fsync.
 	 */
 	if (!bulk_fsync_objdir ||
 	    git_fsync(fd, FSYNC_WRITEOUT_ONLY) < 0) {
@@ -347,16 +348,22 @@ int index_bulk_checkin(struct object_id *oid,
 		       int fd, size_t size, enum object_type type,
 		       const char *path, unsigned flags)
 {
-	int status = deflate_to_pack(&bulk_checkin_state, oid, fd, size, type,
+	int status = deflate_to_pack(&bulk_checkin_packfile, oid, fd, size, type,
 				     path, flags);
 	if (!odb_transaction_nesting)
-		finish_bulk_checkin(&bulk_checkin_state);
+		flush_bulk_checkin_packfile(&bulk_checkin_packfile);
 	return status;
 }
 
 void begin_odb_transaction(void)
 {
 	odb_transaction_nesting += 1;
+}
+
+void flush_odb_transaction(void)
+{
+	flush_batch_fsync();
+	flush_bulk_checkin_packfile(&bulk_checkin_packfile);
 }
 
 void end_odb_transaction(void)
@@ -368,8 +375,5 @@ void end_odb_transaction(void)
 	if (odb_transaction_nesting)
 		return;
 
-	if (bulk_checkin_state.f)
-		finish_bulk_checkin(&bulk_checkin_state);
-
-	do_batch_fsync();
+	flush_odb_transaction();
 }

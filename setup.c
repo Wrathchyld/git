@@ -459,7 +459,16 @@ static void setup_original_cwd(void)
 	 */
 
 	/* Normalize the directory */
-	strbuf_realpath(&tmp, tmp_original_cwd, 1);
+	if (!strbuf_realpath(&tmp, tmp_original_cwd, 0)) {
+		trace2_data_string("setup", the_repository,
+				   "realpath-path", tmp_original_cwd);
+		trace2_data_string("setup", the_repository,
+				   "realpath-failure", strerror(errno));
+		free((char*)tmp_original_cwd);
+		tmp_original_cwd = NULL;
+		return;
+	}
+
 	free((char*)tmp_original_cwd);
 	tmp_original_cwd = NULL;
 	startup_info->original_cwd = strbuf_detach(&tmp, NULL);
@@ -1120,14 +1129,32 @@ static int safe_directory_cb(const char *key, const char *value, void *d)
 	return 0;
 }
 
-static int ensure_valid_ownership(const char *path)
+/*
+ * Check if a repository is safe, by verifying the ownership of the
+ * worktree (if any), the git directory, and the gitfile (if any).
+ *
+ * Exemptions for known-safe repositories can be added via `safe.directory`
+ * config settings; for non-bare repositories, their worktree needs to be
+ * added, for bare ones their git directory.
+ */
+static int ensure_valid_ownership(const char *gitfile,
+				const char *worktree, const char *gitdir)
 {
-	struct safe_directory_data data = { .path = path };
+	struct safe_directory_data data = {
+		.path = worktree ? worktree : gitdir
+	};
 
 	if (!git_env_bool("GIT_TEST_ASSUME_DIFFERENT_OWNER", 0) &&
-	    is_path_owned_by_current_user(path))
+	   (!gitfile || is_path_owned_by_current_user(gitfile)) &&
+	   (!worktree || is_path_owned_by_current_user(worktree)) &&
+	   (!gitdir || is_path_owned_by_current_user(gitdir)))
 		return 1;
 
+	/*
+	 * data.path is the "path" that identifies the repository and it is
+	 * constant regardless of what failed above. data.is_safe should be
+	 * initialized to false, and might be changed by the callback.
+	 */
 	read_very_early_config(safe_directory_cb, &data);
 
 	return data.is_safe;
@@ -1215,6 +1242,8 @@ static enum discovery_result setup_git_directory_gently_1(struct strbuf *dir,
 		current_device = get_device_or_die(dir->buf, NULL, 0);
 	for (;;) {
 		int offset = dir->len, error_code = 0;
+		char *gitdir_path = NULL;
+		char *gitfile = NULL;
 
 		if (offset > min_offset)
 			strbuf_addch(dir, '/');
@@ -1225,21 +1254,50 @@ static enum discovery_result setup_git_directory_gently_1(struct strbuf *dir,
 			if (die_on_error ||
 			    error_code == READ_GITFILE_ERR_NOT_A_FILE) {
 				/* NEEDSWORK: fail if .git is not file nor dir */
-				if (is_git_directory(dir->buf))
+				if (is_git_directory(dir->buf)) {
 					gitdirenv = DEFAULT_GIT_DIR_ENVIRONMENT;
+					gitdir_path = xstrdup(dir->buf);
+				}
 			} else if (error_code != READ_GITFILE_ERR_STAT_FAILED)
 				return GIT_DIR_INVALID_GITFILE;
-		}
+		} else
+			gitfile = xstrdup(dir->buf);
+		/*
+		 * Earlier, we tentatively added DEFAULT_GIT_DIR_ENVIRONMENT
+		 * to check that directory for a repository.
+		 * Now trim that tentative addition away, because we want to
+		 * focus on the real directory we are in.
+		 */
 		strbuf_setlen(dir, offset);
 		if (gitdirenv) {
-			if (!ensure_valid_ownership(dir->buf))
-				return GIT_DIR_INVALID_OWNERSHIP;
-			strbuf_addstr(gitdir, gitdirenv);
-			return GIT_DIR_DISCOVERED;
+			enum discovery_result ret;
+
+			if (ensure_valid_ownership(gitfile,
+						 dir->buf,
+				 (gitdir_path ? gitdir_path : gitdirenv))) {
+				strbuf_addstr(gitdir, gitdirenv);
+				ret = GIT_DIR_DISCOVERED;
+			} else
+				ret = GIT_DIR_INVALID_OWNERSHIP;
+
+			/*
+			 * Earlier, during discovery, we might have allocated
+			 * string copies for gitdir_path or gitfile so make
+			 * sure we don't leak by freeing them now, before
+			 * leaving the loop and function.
+			 *
+			 * Note: gitdirenv will be non-NULL whenever these are
+			 * allocated, therefore we need not take care of releasing
+			 * them outside of this conditional block.
+			 */
+			free(gitdir_path);
+			free(gitfile);
+
+			return ret;
 		}
 
 		if (is_git_directory(dir->buf)) {
-			if (!ensure_valid_ownership(dir->buf))
+			if (!ensure_valid_ownership(NULL, NULL, dir->buf))
 				return GIT_DIR_INVALID_OWNERSHIP;
 			strbuf_addstr(gitdir, ".");
 			return GIT_DIR_BARE;
@@ -1376,6 +1434,16 @@ const char *setup_git_directory_gently(int *nongit_ok)
 		if (!nongit_ok) {
 			struct strbuf prequoted = STRBUF_INIT;
 			struct strbuf quoted = STRBUF_INIT;
+			struct strbuf hint = STRBUF_INIT;
+
+#ifdef __MINGW32__
+			if (!git_env_bool("GIT_TEST_DEBUG_UNSAFE_DIRECTORIES", 0))
+				strbuf_addstr(&hint,
+					      _("\n\nSet the environment variable "
+						"GIT_TEST_DEBUG_UNSAFE_DIRECTORIES=true "
+						"and run\n"
+						"again for more information."));
+#endif
 
 #ifdef __MINGW32__
 			if (dir.buf[0] == '/')
@@ -1385,11 +1453,11 @@ const char *setup_git_directory_gently(int *nongit_ok)
 			strbuf_add(&prequoted, dir.buf, dir.len);
 			sq_quote_buf_pretty(&quoted, prequoted.buf);
 
-			die(_("unsafe repository ('%s' is owned by someone else)\n"
+			die(_("detected dubious ownership in repository at '%s'\n"
 			      "To add an exception for this directory, call:\n"
 			      "\n"
-			      "\tgit config --global --add safe.directory %s"),
-			    dir.buf, quoted.buf);
+			      "\tgit config --global --add safe.directory %s%s"),
+			    dir.buf, quoted.buf, hint.buf);
 		}
 		*nongit_ok = 1;
 		break;
@@ -1478,7 +1546,7 @@ int git_config_perm(const char *var, const char *value)
 	int i;
 	char *endptr;
 
-	if (value == NULL)
+	if (!value)
 		return PERM_GROUP;
 
 	if (!strcmp(value, "umask"))

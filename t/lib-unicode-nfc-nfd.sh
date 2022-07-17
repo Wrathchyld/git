@@ -38,26 +38,19 @@ test_lazy_prereq UNICODE_COMPOSITION_SENSITIVE '
 # and on APFS, NFC paths are preserved.  As we have established
 # above, this is independent of "composition sensitivity".
 #
-# 0000000 63 5f c3 a9
-#
-# (/usr/bin/od output contains different amount of whitespace
-# on different platforms, so we need the wildcards here.)
-#
 test_lazy_prereq UNICODE_NFC_PRESERVED '
 	mkdir c_${utf8_nfc} &&
-	ls | od -t x1 | grep "63 *5f *c3 *a9"
+	ls | test-tool hexdump >dump &&
+	grep "63 5f c3 a9" dump
 '
 
 # Is the spelling of an NFD pathname preserved on disk?
 #
-# 0000000 64 5f 65 cc 81
-#
 test_lazy_prereq UNICODE_NFD_PRESERVED '
 	mkdir d_${utf8_nfd} &&
-	ls | od -t x1 | grep "64 *5f *65 *cc *81"
+	ls | test-tool hexdump >dump &&
+	grep "64 5f 65 cc 81" dump
 '
-	mkdir c_${utf8_nfc} &&
-	mkdir d_${utf8_nfd} &&
 
 # The following _DOUBLE_ forms are more for my curiosity,
 # but there may be quirks lurking when there are multiple
@@ -103,14 +96,16 @@ test_lazy_prereq UNICODE_DOUBLE_COMPOSITION_SENSITIVE '
 #
 test_lazy_prereq UNICODE_DOUBLE_NFC_PRESERVED '
 	mkdir c_${greek_nfc} &&
-	ls | od -t x1 | grep "63 *5f *e1 *bd *a7"
+	ls | test-tool hexdump >dump &&
+	grep "63 5f e1 bd a7" dump
 '
 
 # See if the NFD spelling appears on the disk.
 #
 test_lazy_prereq UNICODE_DOUBLE_NFD_PRESERVED '
 	mkdir d_${greek_nfd2} &&
-	ls | od -t x1 | grep "64 *5f *cf *89 *cc *94 *cd *82"
+	ls | test-tool hexdump >dump &&
+	grep "64 5f cf 89 cc 94 cd 82" dump
 '
 
 # The following is for debugging. I found it useful when

@@ -50,7 +50,7 @@ struct one_watch
 	 * clients.)
 	 */
 	BOOL has_shortnames;
-	BOOL has_tilda;
+	BOOL has_tilde;
 	wchar_t dotgit_shortname[16]; /* for 8.3 name */
 };
 
@@ -130,25 +130,23 @@ static void check_for_shortnames(struct one_watch *watch)
 {
 	wchar_t buf_in[MAX_LONG_PATH + 1];
 	wchar_t buf_out[MAX_LONG_PATH + 1];
-	wchar_t *last_slash = NULL;
-	wchar_t *last_bslash = NULL;
 	wchar_t *last;
+	wchar_t *p;
 
 	/* build L"<wt-root-path>/.git" */
-	wcscpy(buf_in, watch->wpath_longname);
-	wcscpy(buf_in + watch->wpath_longname_len, L".git");
+	swprintf(buf_in, ARRAY_SIZE(buf_in) - 1, L"%ls.git",
+		 watch->wpath_longname);
 
-	if (!GetShortPathNameW(buf_in, buf_out, MAX_LONG_PATH))
+	if (!GetShortPathNameW(buf_in, buf_out, ARRAY_SIZE(buf_out)))
 		return;
 
-	last_slash = wcsrchr(buf_out, L'/');
-	last_bslash = wcsrchr(buf_out, L'\\');
-	if (last_slash > last_bslash)
-		last = last_slash + 1;
-	else if (last_bslash)
-		last = last_bslash + 1;
-	else
-		last = buf_out;
+	/*
+	 * Get the final filename component of the shortpath.
+	 * We know that the path does not have a final slash.
+	 */
+	for (last = p = buf_out; *p; p++)
+		if (*p == L'/' || *p == '\\')
+			last = p + 1;
 
 	if (!wcscmp(last, L".git"))
 		return;
@@ -170,7 +168,7 @@ static void check_for_shortnames(struct one_watch *watch)
 	 * Lets test this.
 	 */
 	if (wcschr(watch->dotgit_shortname, L'~'))
-		watch->has_tilda = 1;
+		watch->has_tilde = 1;
 }
 
 enum get_relative_result {
@@ -194,24 +192,38 @@ enum get_relative_result {
 static enum get_relative_result get_relative_longname(
 	struct one_watch *watch,
 	const wchar_t *wpath, DWORD wpath_len,
-	wchar_t *wpath_longname)
+	wchar_t *wpath_longname, size_t bufsize_wpath_longname)
 {
 	wchar_t buf_in[2 * MAX_LONG_PATH + 1];
 	wchar_t buf_out[MAX_LONG_PATH + 1];
 	DWORD root_len;
+	DWORD out_len;
 
-	/* Build L"<wt-root-path>/<event-rel-path>" */
+	/*
+	 * Build L"<wt-root-path>/<event-rel-path>"
+	 * Note that the <event-rel-path> might not be null terminated
+	 * so we avoid swprintf() constructions.
+	 */
 	root_len = watch->wpath_longname_len;
+	if (root_len + wpath_len >= ARRAY_SIZE(buf_in)) {
+		/*
+		 * This should not happen.  We cannot append the observed
+		 * relative path onto the end of the worktree root path
+		 * without overflowing the buffer.  Just give up.
+		 */
+		return GRR_SHUTDOWN;
+	}
 	wcsncpy(buf_in, watch->wpath_longname, root_len);
 	wcsncpy(buf_in + root_len, wpath, wpath_len);
 	buf_in[root_len + wpath_len] = 0;
 
 	/*
 	 * We don't actually know if the source pathname is a
-	 * shortname or a longname.  This routine allows either to be
-	 * given as input.
+	 * shortname or a longname.  This Windows routine allows
+	 * either to be given as input.
 	 */
-	if (!GetLongPathNameW(buf_in, buf_out, MAX_LONG_PATH)) {
+	out_len = GetLongPathNameW(buf_in, buf_out, ARRAY_SIZE(buf_out));
+	if (!out_len) {
 		/*
 		 * The shortname to longname conversion can fail for
 		 * various reasons, for example if the file has been
@@ -255,6 +267,15 @@ static enum get_relative_result get_relative_longname(
 		return GRR_SHUTDOWN;
 	}
 
+	if (out_len - root_len >= bufsize_wpath_longname) {
+		/*
+		 * This should not happen.  We cannot copy the root-relative
+		 * portion of the path into the provided buffer without an
+		 * overrun.  Just give up.
+		 */
+		return GRR_SHUTDOWN;
+	}
+
 	/* Return the worktree root-relative portion of the longname. */
 
 	wcscpy(wpath_longname, buf_out + root_len);
@@ -293,14 +314,15 @@ static struct one_watch *create_watch(struct fsmonitor_daemon_state *state,
 		return NULL;
 	}
 
-	if (!GetLongPathNameW(wpath, wpath_longname, MAX_LONG_PATH)) {
+	len_longname = GetLongPathNameW(wpath, wpath_longname,
+					ARRAY_SIZE(wpath_longname));
+	if (!len_longname) {
 		error(_("[GLE %ld] could not get longname of '%s'"),
 		      GetLastError(), path);
 		CloseHandle(hDir);
 		return NULL;
 	}
 
-	len_longname = wcslen(wpath_longname);
 	if (wpath_longname[len_longname - 1] != L'/' &&
 	    wpath_longname[len_longname - 1] != L'\\') {
 		wpath_longname[len_longname++] = L'/';
@@ -578,9 +600,9 @@ static int process_worktree_events(struct fsmonitor_daemon_state *state)
 				goto process_it;
 			}
 
-			if (watch->has_tilda && !wcschr(wpath, L'~')) {
+			if (watch->has_tilde && !wcschr(wpath, L'~')) {
 				/*
-				 * Shortnames on this filesystem have tildas
+				 * Shortnames on this filesystem have tildes
 				 * and the notification path does not have
 				 * one, so we assume that it is a longname.
 				 */
@@ -588,7 +610,8 @@ static int process_worktree_events(struct fsmonitor_daemon_state *state)
 			}
 
 			grr = get_relative_longname(watch, wpath, wpath_len,
-						    wpath_longname);
+						    wpath_longname,
+						    ARRAY_SIZE(wpath_longname));
 			switch (grr) {
 			case GRR_NO_CONVERSION_NEEDED: /* use info buffer as is */
 				break;

@@ -183,18 +183,18 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 	int nr_requests = 1;
 
 	const char * const fsmonitor_client_usage[] = {
-		N_("test-tool fsmonitor-client query [<token>]"),
-		N_("test-tool fsmonitor-client flush"),
-		N_("test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]"),
+		"test-tool fsmonitor-client query [<token>]",
+		"test-tool fsmonitor-client flush",
+		"test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]",
 		NULL,
 	};
 
 	struct option options[] = {
-		OPT_STRING(0, "token", &token, N_("token"),
-			   N_("command token to send to the server")),
+		OPT_STRING(0, "token", &token, "token",
+			   "command token to send to the server"),
 
-		OPT_INTEGER(0, "threads", &nr_threads, N_("number of client threads")),
-		OPT_INTEGER(0, "requests", &nr_requests, N_("number of requests per thread")),
+		OPT_INTEGER(0, "threads", &nr_threads, "number of client threads"),
+		OPT_INTEGER(0, "requests", &nr_requests, "number of requests per thread"),
 
 		OPT_END()
 	};
